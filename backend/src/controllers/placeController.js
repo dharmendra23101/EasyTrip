@@ -1,52 +1,83 @@
-const { Pool } = require('pg');
-const path = require('path');
-const fs = require('fs');
-const placeModel = require('../models/placeModel');
-const { uploadImage } = require('../config/cloudinary');
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
-
-// Get current user from request
-const getCurrentUser = (req) => {
-  // Use the authenticated user from req.user or from headers, with a fallback
-  return req.user?.uid || req.headers['x-user'] || 'anonymous_user';
-};
-
-const getCurrentUserName = (req) => {
-  // Use the authenticated user's name from req.dbUser or from headers, with a fallback
-  return req.dbUser?.name || req.headers['x-user-name'] || 'Anonymous User';
-};
-
 /**
- * Get all places
+ * Places: read and write.
+ *
+ * Split from a single 958-line controller in Sprint 5.14. Images, reviews and taxonomy moved to
+ * sibling modules; this file re-exports all of them so `placeRoutes.js` keeps one import and the
+ * public surface is unchanged.
  */
-const getAllPlaces = async (req, res) => {
+const placeModel = require('../models/placeModel');
+const logger = require('../utils/logger');
+const { getCurrentUser } = require('./helpers/currentUser');
+const { criteriaFromQuery } = require('./helpers/placeQuery');
+const { sameCoordinate, resolveCoordinateSource } = require('./helpers/coordinateSource');
+const { accessibilityForCreate, accessibilityPatch } = require('./helpers/placeAccessibility');
+const {
+  seasonalityForCreate,
+  seasonalityPatch,
+  seasonalityBody
+} = require('./helpers/placeSeasonality');
+const { provided, parseJsonField } = require('./helpers/writeFields');
+
+const fs = require('fs');
+const {
+  uploadImage,
+  destroyImage,
+  destroyPlaceAssets,
+  publicIdFromUrl
+} = require('../config/cloudinary');
+
+// Re-exported so `placeRoutes.js` keeps a single import and the surface stays identical.
+const alternatives = require('./placeAlternativesController');
+const images = require('./placeImageController');
+const reviews = require('./placeReviewController');
+const taxonomy = require('./placeTaxonomyController');
+
+const listPlacesHandler = async (req, res) => {
   try {
-    const timestamp = new Date().toISOString();
-    const user = getCurrentUser(req);
-    
-    console.log(`[${timestamp}] Getting all places - Requested by: ${user}`);
-    
-    const places = await placeModel.getAllPlaces();
-    
-    const formattedPlaces = places.map(place => ({
+    const { sort, limit, offset, projection, withStats } = req.query;
+    const filters = criteriaFromQuery(req.query);
+
+    const result = await placeModel.listPlaces({
+      filters,
+      sort,
+      limit,
+      offset,
+      projection: projection === 'map' ? 'map' : 'list',
+      withStats: withStats === 'true' || withStats === '1'
+    });
+
+    const data = result.rows.map(({ fallback_image_url, ...place }) => ({
       ...place,
-      image_url: place.primary_image_url || `/api/places/${place.id}/image`,
-      fetched_at: timestamp,
-      fetched_by: user
+      image_url: place.primary_image_url || fallback_image_url || null
     }));
-    
-    console.log(`[${timestamp}] Found ${places.length} places`);
-    
-    res.status(200).json(formattedPlaces);
+
+    const body = {
+      data,
+      pagination: {
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+        hasMore: result.offset + data.length < result.total,
+        // The sort that actually ran, from the model, not a second guess at it here. A search with
+        // no explicit `sort` resolves to `relevance` (IMP-112) and `relevance` with no search term
+        // resolves back to `newest`; re-deriving that rule in the controller is how the response
+        // ends up claiming an order the query did not use.
+        sort: result.sort
+      }
+    };
+
+    // Present only when asked for, so a caller cannot mistake its absence for zeroes.
+    if (result.stats) body.stats = result.stats;
+
+    res.status(200).json(body);
   } catch (error) {
-    console.error('[ERROR] Error getting places:', error);
-    res.status(500).json({ 
+    logger.error({ err: error }, 'Error listing places');
+    res.status(500).json({
       message: 'Error getting places',
-      error: process.env.NODE_ENV === 'production' ? 'Server error' : error.message,
+      // Safe by default: only an explicit NODE_ENV=development exposes driver text.
+      // The old `=== 'production' ? safe : leak` test leaked whenever NODE_ENV was
+      // unset, which is exactly what `npm start` does (SECURITY_AUDIT 10.4).
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Server error',
       timestamp: new Date().toISOString()
     });
   }
@@ -55,43 +86,42 @@ const getAllPlaces = async (req, res) => {
 /**
  * Get place by ID
  */
+
 const getPlaceById = async (req, res) => {
   try {
     const { id } = req.params;
     const timestamp = new Date().toISOString();
     const user = getCurrentUser(req);
-    
-    console.log(`[${timestamp}] Getting place by ID: ${id} - Requested by: ${user}`);
-    
+
     if (isNaN(parseInt(id))) {
       return res.status(400).json({ message: 'Invalid place ID format' });
     }
-    
+
     const place = await placeModel.getPlaceById(id);
 
     if (!place) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         message: 'Place not found',
         timestamp,
         requested_by: user
       });
     }
 
+    const { fallback_image_url, ...placeFields } = place;
     const formattedPlace = {
-      ...place,
-      image_url: place.primary_image_url || `/api/places/${id}/image`,
-      fetched_at: timestamp,
-      fetched_by: user
+      ...placeFields,
+      image_url: place.primary_image_url || fallback_image_url || null
     };
-    
-    console.log(`[${timestamp}] Found place: ID=${place.id}, Name=${place.name}`);
-    
+
     res.status(200).json(formattedPlace);
   } catch (error) {
-    console.error('[ERROR] Error getting place:', error);
-    res.status(500).json({ 
+    logger.error({ err: error }, 'Error getting place');
+    res.status(500).json({
       message: 'Error getting place',
-      error: process.env.NODE_ENV === 'production' ? 'Server error' : error.message,
+      // Safe by default: only an explicit NODE_ENV=development exposes driver text.
+      // The old `=== 'production' ? safe : leak` test leaked whenever NODE_ENV was
+      // unset, which is exactly what `npm start` does (SECURITY_AUDIT 10.4).
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Server error',
       timestamp: new Date().toISOString()
     });
   }
@@ -100,138 +130,44 @@ const getPlaceById = async (req, res) => {
 /**
  * Get image for a place
  */
-const getPlaceImage = async (req, res) => {
-  try {
-    const { id, imageId } = req.params;
-    const timestamp = new Date().toISOString();
-    const user = getCurrentUser(req);
-    
-    console.log(`[${timestamp}] Image request - Place ID: ${id}, Image ID: ${imageId || 'primary'} - By: ${user}`);
-    
-    if (isNaN(parseInt(id))) {
-      return sendDefaultImage(res, timestamp, id);
-    }
-    
-    // Get place data
-    const place = await placeModel.getPlaceById(id);
-    
-    if (!place) {
-      return sendDefaultImage(res, timestamp, id);
-    }
-    
-    // If specific image ID requested
-    if (imageId) {
-      try {
-        const image = await pool.query(
-          'SELECT image_url FROM place_images WHERE id = $1 AND place_id = $2',
-          [imageId, id]
-        );
-        
-        if (image.rows.length > 0 && image.rows[0].image_url) {
-          console.log(`[${timestamp}] Redirecting to specific image: ${image.rows[0].image_url}`);
-          return res.redirect(image.rows[0].image_url);
-        }
-      } catch (err) {
-        console.warn(`[${timestamp}] Error getting specific image:`, err.message);
-      }
-    }
-    
-    // Use primary image URL if available
-    if (place.primary_image_url) {
-      console.log(`[${timestamp}] Redirecting to primary image: ${place.primary_image_url}`);
-      return res.redirect(place.primary_image_url);
-    }
-    
-    // Try to get first available image
-    try {
-      const fallbackImage = await pool.query(
-        'SELECT image_url FROM place_images WHERE place_id = $1 ORDER BY display_order, created_at LIMIT 1',
-        [id]
-      );
-      
-      if (fallbackImage.rows.length > 0 && fallbackImage.rows[0].image_url) {
-        console.log(`[${timestamp}] Redirecting to fallback image: ${fallbackImage.rows[0].image_url}`);
-        return res.redirect(fallbackImage.rows[0].image_url);
-      }
-    } catch (err) {
-      console.warn(`[${timestamp}] Error getting fallback image:`, err.message);
-    }
-    
-    // No image found, return default
-    return sendDefaultImage(res, timestamp, id);
-  } catch (error) {
-    console.error('[ERROR] Error getting place image:', error);
-    return sendDefaultImage(res, new Date().toISOString(), req.params.id);
-  }
-};
 
-/**
- * Send default placeholder image
- */
-const sendDefaultImage = (res, timestamp, placeId) => {
-  try {
-    const svgPlaceholder = `
-      <svg width="400" height="300" xmlns="http://www.w3.org/2000/svg">
-        <rect width="100%" height="100%" fill="#f5f5f5" stroke="#e0e0e0" stroke-width="2"/>
-        <text x="50%" y="45%" font-family="Arial, sans-serif" font-size="16" text-anchor="middle" fill="#666">
-          No Image Available
-        </text>
-        <text x="50%" y="60%" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="#999">
-          Place ID: ${placeId}
-        </text>
-      </svg>
-    `;
-    
-    console.log(`[${timestamp}] Serving SVG placeholder for place: ${placeId}`);
-    res.set({
-      'Content-Type': 'image/svg+xml',
-      'Cache-Control': 'public, max-age=3600',
-      'Content-Length': Buffer.byteLength(svgPlaceholder)
-    });
-    return res.send(svgPlaceholder);
-  } catch (err) {
-    console.error(`[${timestamp}] Error serving placeholder:`, err);
-    return res.status(404).json({ 
-      message: 'Image not found',
-      place_id: placeId,
-      timestamp
-    });
-  }
-};
-
-/**
- * Create a new place with Cloudinary
- */
 const createPlace = async (req, res) => {
   try {
     const timestamp = new Date().toISOString();
     const user = getCurrentUser(req);
-    const userName = getCurrentUserName(req);
-    
-    console.log(`[${timestamp}] Creating new place - User: ${userName} (${user})`);
-    console.log(`[${timestamp}] Request body:`, {
-      name: req.body.name,
-      location: req.body.location,
-      district: req.body.district,
-      state: req.body.state,
-      hasImage: !!req.file,
-      imageSize: req.file ? `${Math.round(req.file.size/1024)}KB` : 'none'
-    });
-    
-    const { 
-      name, description, location, district, state, locality, pin_code,
-      latitude, longitude, themes, tags, custom_keys 
+
+    const {
+      name,
+      description,
+      location,
+      district,
+      state,
+      locality,
+      pin_code,
+      latitude,
+      longitude,
+      coordinates_source,
+      setting,
+      themes,
+      tags,
+      custom_keys
     } = req.body;
-    
+
     // Validate required fields
     if (!name || !location) {
-      console.warn(`[${timestamp}] Missing required fields`);
-      return res.status(400).json({ 
+      logger.warn('Place create rejected: missing required fields');
+      return res.status(400).json({
         message: 'Name and location are required',
         timestamp
       });
     }
-    
+
+    // A falsy coordinate means "no coordinate" throughout this controller, and the validator skips
+    // `toFloat()` so a sanitized 0 cannot read as absent. Parsed once here because the provenance
+    // decision below needs to know whether a pair actually survived (IMP-127).
+    const nextLatitude = latitude ? parseFloat(latitude) : null;
+    const nextLongitude = longitude ? parseFloat(longitude) : null;
+
     // Create place data without image initially
     const placeData = {
       name: name.trim(),
@@ -241,44 +177,41 @@ const createPlace = async (req, res) => {
       state: state?.trim() || null,
       locality: locality?.trim() || null,
       pin_code: pin_code?.trim() || null,
-      latitude: latitude ? parseFloat(latitude) : null,
-      longitude: longitude ? parseFloat(longitude) : null,
+      latitude: nextLatitude,
+      longitude: nextLongitude,
+      // Every create sets its coordinates, so `coordinatesChanged` is unconditionally true — the
+      // same rule as an update, with no prior claim to inherit.
+      coordinates_source: resolveCoordinateSource({
+        requested: coordinates_source,
+        hasCoordinates: nextLatitude !== null && nextLongitude !== null,
+        coordinatesChanged: true
+      }),
       primary_image_url: null, // Will be updated after upload
       themes: parseJsonField(themes, []),
       tags: parseJsonField(tags, []),
       custom_keys: parseJsonField(custom_keys, {}),
+      setting,
+      // An omitted accessibility section creates an unsurveyed row, never an unattributed claim.
+      ...accessibilityForCreate(req.body),
+      // `FV-028`, same contract: an omitted section creates an uncurated row, never a claim.
+      ...seasonalityForCreate(seasonalityBody(req.body)),
       created_by: user,
       updated_by: user
     };
-    
-    console.log(`[${timestamp}] Creating place with data:`, {
-      name: placeData.name,
-      location: placeData.location,
-      hasImage: !!req.file,
-      themesCount: Array.isArray(placeData.themes) ? placeData.themes.length : 0,
-      tagsCount: Array.isArray(placeData.tags) ? placeData.tags.length : 0
-    });
-    
+
     // Insert place into database first
     const newPlace = await placeModel.createPlace(placeData);
-    console.log(`[${timestamp}] Place created in database: ID=${newPlace.id}, Name=${newPlace.name}`);
-    
+    logger.info({ placeId: newPlace.id }, 'Place created');
+
     // Process image upload if present
     let imageUrl = null;
     if (req.file) {
       try {
-        console.log(`[${timestamp}] Uploading image to Cloudinary...`);
-        console.log(`[${timestamp}] File details:`, {
-          path: req.file.path,
-          size: req.file.size,
-          mimetype: req.file.mimetype
-        });
-        
         // Check if file exists and has size
         if (!req.file.path || !fs.existsSync(req.file.path)) {
           throw new Error(`File not found at path: ${req.file.path}`);
         }
-        
+
         // Upload to Cloudinary
         const result = await uploadImage(req.file.path, {
           folder: `easytrip/places/${newPlace.id}`,
@@ -286,36 +219,39 @@ const createPlace = async (req, res) => {
           tags: ['place', `id_${newPlace.id}`, 'primary'],
           context: `place_id=${newPlace.id}|user=${user}|name=${encodeURIComponent(newPlace.name)}`
         });
-        
+
         imageUrl = result.url;
-        console.log(`[${timestamp}] Image uploaded successfully: ${imageUrl}`);
-        
+        logger.debug({ imageUrl }, 'Image uploaded to Cloudinary');
+
         // Update the place record with the image URL
         await placeModel.updatePlace(newPlace.id, { primary_image_url: imageUrl });
-        console.log(`[${timestamp}] Place record updated with image URL`);
-        
+
         // Update the newPlace object with the image URL
         newPlace.primary_image_url = imageUrl;
       } catch (uploadError) {
-        console.error(`[${timestamp}] Cloudinary upload error:`, uploadError);
-        // Don't fail the request, just log the error
-        console.log(`[${timestamp}] Continuing without image due to upload error`);
+        // Don't fail the request; the place is created without an image.
+        logger.error(
+          { err: uploadError },
+          'Cloudinary upload failed; place created without an image'
+        );
       }
     }
-    
+
     const response = {
       ...newPlace,
-      image_url: newPlace.primary_image_url || `/api/places/${newPlace.id}/image`,
+      image_url: newPlace.primary_image_url || null,
       success: true
     };
-    
+
     res.status(201).json(response);
-    
   } catch (error) {
-    console.error(`[ERROR] Error creating place:`, error);
-    res.status(500).json({ 
+    logger.error({ err: error }, 'Error creating place');
+    res.status(500).json({
       message: 'Error creating place',
-      error: process.env.NODE_ENV === 'production' ? 'Server error' : error.message,
+      // Safe by default: only an explicit NODE_ENV=development exposes driver text.
+      // The old `=== 'production' ? safe : leak` test leaked whenever NODE_ENV was
+      // unset, which is exactly what `npm start` does (SECURITY_AUDIT 10.4).
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Server error',
       timestamp: new Date().toISOString()
     });
   }
@@ -324,45 +260,47 @@ const createPlace = async (req, res) => {
 /**
  * Update a place with Cloudinary
  */
+
 const updatePlace = async (req, res) => {
   try {
     const { id } = req.params;
-    const timestamp = new Date().toISOString();
     const user = getCurrentUser(req);
-    const userName = getCurrentUserName(req);
-    
-    console.log(`[${timestamp}] Updating place ID: ${id} - User: ${userName} (${user})`);
-    
+
     if (isNaN(parseInt(id))) {
       return res.status(400).json({ message: 'Invalid place ID format' });
     }
-    
+
     const currentPlace = await placeModel.getPlaceById(id);
     if (!currentPlace) {
       return res.status(404).json({ message: 'Place not found' });
     }
-    
-    const { 
-      name, description, location, district, state, locality, pin_code,
-      latitude, longitude, themes, tags, custom_keys 
+
+    const {
+      name,
+      description,
+      location,
+      district,
+      state,
+      locality,
+      pin_code,
+      latitude,
+      longitude,
+      coordinates_source,
+      setting,
+      themes,
+      tags,
+      custom_keys
     } = req.body;
-    
+
     // Process image upload if present
     let imageUrl = currentPlace.primary_image_url;
     if (req.file) {
       try {
-        console.log(`[${timestamp}] Uploading updated image to Cloudinary...`);
-        console.log(`[${timestamp}] File details:`, {
-          path: req.file.path,
-          size: req.file.size,
-          mimetype: req.file.mimetype
-        });
-        
         // Check if file exists and has size
         if (!req.file.path || !fs.existsSync(req.file.path)) {
           throw new Error(`File not found at path: ${req.file.path}`);
         }
-        
+
         // Upload to Cloudinary
         const result = await uploadImage(req.file.path, {
           folder: `easytrip/places/${id}`,
@@ -370,20 +308,39 @@ const updatePlace = async (req, res) => {
           tags: ['place', `id_${id}`, 'primary', 'updated'],
           context: `place_id=${id}|user=${user}|updated=true|name=${encodeURIComponent(currentPlace.name)}`
         });
-        
+
+        const previousImageUrl = imageUrl;
         imageUrl = result.url;
-        console.log(`[${timestamp}] Updated image uploaded successfully, URL: ${imageUrl}`);
-        
-        // Explicitly log and verify URL is properly set
-        console.log(`[${timestamp}] Setting primary_image_url to: ${imageUrl}`);
+        logger.debug({ imageUrl }, 'Replacement image uploaded to Cloudinary');
+
+        // Replacing the primary image orphans the old asset. Every upload uses a fresh
+        // timestamped public_id, so the replacement never overwrites its predecessor — without
+        // this, editing a place's photo N times left N-1 assets paid for and unreachable.
+        // Only after the new upload succeeded, so a failed replace keeps the existing image.
+        const previousPublicId = publicIdFromUrl(previousImageUrl);
+        if (previousPublicId && previousPublicId !== result.public_id) {
+          const wasRemoved = await destroyImage(previousPublicId);
+          logger.debug({ previousPublicId, removed: wasRemoved }, 'Previous image cleanup');
+        }
       } catch (uploadError) {
-        console.error(`[${timestamp}] Cloudinary upload error:`, uploadError);
-        console.error('Error details:', uploadError);
-        // Keep the old image URL
-        console.log(`[${timestamp}] Keeping old image URL: ${imageUrl}`);
+        // Keep the old image URL rather than failing the whole update.
+        logger.error({ err: uploadError }, 'Cloudinary upload failed; keeping the existing image');
       }
     }
-    
+
+    const nextLatitude =
+      latitude !== undefined ? (latitude ? parseFloat(latitude) : null) : currentPlace.latitude;
+    const nextLongitude =
+      longitude !== undefined ? (longitude ? parseFloat(longitude) : null) : currentPlace.longitude;
+
+    // Compared by value, not by whether the field was sent (IMP-127). The edit form posts every
+    // field on every save, so "was latitude in the body?" is true even when the admin only touched
+    // the description — and treating that as a coordinate change would revoke OSM attribution on
+    // an unrelated edit. What matters is whether the pin actually moved.
+    const coordinatesChanged =
+      !sameCoordinate(nextLatitude, currentPlace.latitude) ||
+      !sameCoordinate(nextLongitude, currentPlace.longitude);
+
     const placeData = {
       name: name || currentPlace.name,
       description: description !== undefined ? description : currentPlace.description,
@@ -392,256 +349,146 @@ const updatePlace = async (req, res) => {
       state: state !== undefined ? state : currentPlace.state,
       locality: locality !== undefined ? locality : currentPlace.locality,
       pin_code: pin_code !== undefined ? pin_code : currentPlace.pin_code,
-      latitude: latitude !== undefined ? (latitude ? parseFloat(latitude) : null) : currentPlace.latitude,
-      longitude: longitude !== undefined ? (longitude ? parseFloat(longitude) : null) : currentPlace.longitude,
+      latitude: nextLatitude,
+      longitude: nextLongitude,
+      coordinates_source: resolveCoordinateSource({
+        requested: coordinates_source,
+        hasCoordinates: nextLatitude !== null && nextLongitude !== null,
+        coordinatesChanged,
+        current: currentPlace.coordinates_source
+      }),
       primary_image_url: imageUrl,
       themes: parseJsonField(themes, currentPlace.themes || []),
       tags: parseJsonField(tags, currentPlace.tags || []),
       custom_keys: parseJsonField(custom_keys, currentPlace.custom_keys || {}),
+      // Spread conditionally, because `updatePlace` keys on `column in placeData` rather than on
+      // the value. Writing `setting,` unconditionally would put the key there with `undefined`,
+      // node-pg would send NULL, and the NOT NULL column would reject the whole edit — the
+      // BUG-048 shape, one column over. Omitted means "leave the classification alone".
+      // `provided`, not `!== undefined`: an untouched <select> submits `setting=""`, the validator
+      // reads that as "said nothing", and passing it through put an empty string against a CHECK
+      // constraint — a 500 on an ordinary edit (`BUG-055`). One predicate for both halves now.
+      ...provided('setting', setting),
+      // Sparse for the same reason `setting` is, and for one more of its own: these five are
+      // checked against each other by the database, so sending NULL for the keys a request omitted
+      // would strip the provenance from a row that still claims step-free access. See the helper.
+      ...accessibilityPatch(req.body),
+      ...seasonalityPatch(seasonalityBody(req.body)),
       updated_by: user
     };
-    
-    console.log(`[${timestamp}] Final update data:`, {
-      name: placeData.name,
-      imageUrl: placeData.primary_image_url 
-    });
 
     const updatedPlace = await placeModel.updatePlace(id, placeData);
-    console.log(`[${timestamp}] Place updated successfully: ID=${updatedPlace.id}`);
-    
+    logger.info({ placeId: updatedPlace.id }, 'Place updated');
+
     const response = {
       ...updatedPlace,
-      image_url: updatedPlace.primary_image_url || `/api/places/${id}/image`
+      image_url: updatedPlace.primary_image_url || null
     };
-    
+
     res.status(200).json(response);
   } catch (error) {
-    console.error('[ERROR] Error updating place:', error);
-    res.status(500).json({ 
+    logger.error({ err: error }, 'Error updating place');
+    res.status(500).json({
       message: 'Error updating place',
-      error: process.env.NODE_ENV === 'production' ? 'Server error' : error.message,
+      // Safe by default: only an explicit NODE_ENV=development exposes driver text.
+      // The old `=== 'production' ? safe : leak` test leaked whenever NODE_ENV was
+      // unset, which is exactly what `npm start` does (SECURITY_AUDIT 10.4).
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Server error',
       timestamp: new Date().toISOString()
     });
   }
 };
 
-// Helper function to parse JSON fields
-function parseJsonField(field, defaultValue) {
-  if (!field) return defaultValue;
-  
-  try {
-    return typeof field === 'string' ? JSON.parse(field) : field;
-  } catch (e) {
-    console.warn(`Error parsing JSON field:`, e.message);
-    return defaultValue;
-  }
-}
-
 /**
  * Delete a place
  */
+
 const deletePlace = async (req, res) => {
   try {
     const { id } = req.params;
     const timestamp = new Date().toISOString();
     const user = getCurrentUser(req);
-    const userName = getCurrentUserName(req);
-    
-    console.log(`[${timestamp}] Deleting place ID: ${id} - User: ${userName} (${user})`);
-    
+
     if (isNaN(parseInt(id))) {
       return res.status(400).json({ message: 'Invalid place ID format' });
     }
-    
+
     const place = await placeModel.getPlaceById(id);
     if (!place) {
       return res.status(404).json({ message: 'Place not found' });
     }
-    
+
     const success = await placeModel.deletePlace(id);
     if (!success) {
       throw new Error('Failed to delete place');
     }
-    
-    console.log(`[${timestamp}] Place deleted successfully: ID=${id}`);
-    
-    res.status(200).json({ 
+
+    // Remote media is cleaned up only AFTER the row is gone. Doing it first would risk destroying
+    // the images of a place that then fails to delete. The call never throws — an orphaned asset
+    // costs storage, whereas failing the request after the row is already deleted would leave the
+    // caller believing the delete failed when it succeeded (IMP-024).
+    const removed = await destroyPlaceAssets(id);
+    logger.debug({ placeId: id, removed }, 'Cloudinary cleanup for deleted place');
+
+    logger.info({ placeId: id }, 'Place deleted');
+
+    res.status(200).json({
       message: 'Place deleted successfully',
       id,
       name: place.name,
       deleted_by: user,
-      deleted_at: timestamp 
+      deleted_at: timestamp
     });
   } catch (error) {
-    console.error('[ERROR] Error deleting place:', error);
-    res.status(500).json({ 
+    logger.error({ err: error }, 'Error deleting place');
+    res.status(500).json({
       message: 'Error deleting place',
-      error: process.env.NODE_ENV === 'production' ? 'Server error' : error.message,
+      // Safe by default: only an explicit NODE_ENV=development exposes driver text.
+      // The old `=== 'production' ? safe : leak` test leaked whenever NODE_ENV was
+      // unset, which is exactly what `npm start` does (SECURITY_AUDIT 10.4).
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Server error',
       timestamp: new Date().toISOString()
     });
   }
 };
 
-// Search and metadata functions
-const searchPlaces = async (req, res) => {
+/**
+ * Search suggestions (`IMP-112` / `ADR-033`).
+ *
+ * Public and unauthenticated, like every other place read. Returns a bare array rather than the
+ * `{ data, pagination }` envelope the list endpoints use: there is no pagination here by
+ * construction — the cap is the point — and an envelope would invite a client to ask for page two
+ * of a typeahead.
+ *
+ * An empty or whitespace-only `q` is `[]` with a 200, not a 400. The browser sends one the moment
+ * the box is cleared, and a 400 there is an error the client has to special-case to ignore.
+ */
+const suggestPlaces = async (req, res) => {
   try {
-    const { searchTerm, location, tags, district, state } = req.query;
-    const timestamp = new Date().toISOString();
-    const user = getCurrentUser(req);
-    
-    const criteria = {
-      searchTerm: searchTerm?.trim(),
-      location: location?.trim(),
-      district: district?.trim(),
-      state: state?.trim(),
-      tags: tags ? (Array.isArray(tags) ? tags : JSON.parse(tags)) : undefined
-    };
-    
-    const places = await placeModel.searchPlaces(criteria);
-    
-    const formattedPlaces = places.map(place => ({
-      ...place,
-      image_url: place.primary_image_url || `/api/places/${place.id}/image`,
-      fetched_at: timestamp,
-      fetched_by: user
-    }));
-    
-    res.status(200).json(formattedPlaces);
+    const suggestions = await placeModel.suggestPlaces({
+      term: req.query.q,
+      limit: req.query.limit
+    });
+    res.status(200).json({ data: suggestions });
   } catch (error) {
-    console.error('[ERROR] Error searching places:', error);
-    res.status(500).json({ 
-      message: 'Error searching places',
-      error: process.env.NODE_ENV === 'production' ? 'Server error' : error.message,
+    logger.error({ err: error }, 'Error building search suggestions');
+    res.status(500).json({
+      message: 'Error getting suggestions',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Server error',
       timestamp: new Date().toISOString()
     });
-  }
-};
-
-const getPlaceImages = async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    if (isNaN(parseInt(id))) {
-      return res.status(400).json({ message: 'Invalid place ID format' });
-    }
-    
-    const images = await pool.query(
-      'SELECT id, place_id, image_url, caption, display_order, created_at FROM place_images WHERE place_id = $1 ORDER BY display_order, created_at',
-      [id]
-    );
-    
-    res.status(200).json(images.rows);
-  } catch (error) {
-    console.error('[ERROR] Error getting place images:', error);
-    res.status(500).json({ 
-      message: 'Error getting place images',
-      error: process.env.NODE_ENV === 'production' ? 'Server error' : error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
-};
-
-const getAllLocations = async (req, res) => {
-  try {
-    const locations = await placeModel.getUniqueLocations();
-    res.status(200).json(locations);
-  } catch (error) {
-    console.error('[ERROR] Error getting locations:', error);
-    res.status(500).json({ message: 'Error getting locations' });
-  }
-};
-
-const getDistricts = async (req, res) => {
-  try {
-    const districts = await placeModel.getUniqueDistricts();
-    res.status(200).json(districts);
-  } catch (error) {
-    console.error('[ERROR] Error getting districts:', error);
-    res.status(500).json({ message: 'Error getting districts' });
-  }
-};
-
-const getStates = async (req, res) => {
-  try {
-    const states = await placeModel.getUniqueStates();
-    res.status(200).json(states);
-  } catch (error) {
-    console.error('[ERROR] Error getting states:', error);
-    res.status(500).json({ message: 'Error getting states' });
-  }
-};
-
-const getTags = async (req, res) => {
-  try {
-    const tags = await placeModel.getUniqueTags();
-    res.status(200).json(tags);
-  } catch (error) {
-    console.error('[ERROR] Error getting tags:', error);
-    res.status(500).json({ message: 'Error getting tags' });
-  }
-};
-
-// Review functions
-const getPlaceReviews = async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    if (isNaN(parseInt(id))) {
-      return res.status(400).json({ message: 'Invalid place ID format' });
-    }
-    
-    const result = await pool.query(
-      'SELECT id, user_id, user_name, rating, comment, created_at, updated_at FROM place_reviews WHERE place_id = $1 ORDER BY created_at DESC',
-      [id]
-    );
-    
-    res.status(200).json(result.rows);
-  } catch (error) {
-    console.error('[ERROR] Error getting reviews:', error);
-    res.status(500).json({ message: 'Error getting reviews' });
-  }
-};
-
-const createPlaceReview = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { rating, comment } = req.body;
-    const user = getCurrentUser(req);
-    const userName = getCurrentUserName(req);
-    
-    if (isNaN(parseInt(id))) {
-      return res.status(400).json({ message: 'Invalid place ID format' });
-    }
-    
-    if (!rating || rating < 1 || rating > 5) {
-      return res.status(400).json({ message: 'Rating must be between 1 and 5' });
-    }
-    
-    const result = await pool.query(
-      'INSERT INTO place_reviews (place_id, user_id, user_name, rating, comment, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, NOW(), NOW()) RETURNING *',
-      [id, user, userName, rating, comment || null]
-    );
-    
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
-    console.error('[ERROR] Error creating review:', error);
-    res.status(500).json({ message: 'Error creating review' });
   }
 };
 
 module.exports = {
-  getAllPlaces,
+  listPlaces: listPlacesHandler,
+  suggestPlaces,
   getPlaceById,
-  getPlaceImage,
-  getPlaceImages,
   createPlace,
   updatePlace,
   deletePlace,
-  searchPlaces,
-  getAllLocations,
-  getDistricts,
-  getStates,
-  getTags,
-  getPlaceReviews,
-  createPlaceReview
+  ...alternatives,
+  ...images,
+  ...reviews,
+  ...taxonomy
 };

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { memo, useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -14,14 +14,39 @@ import {
   FiCheck
 } from 'react-icons/fi';
 
-const PlaceCard = ({ place, timestamp, username, priority = false }) => {
+import { getPlaceImageUrl } from '../utils/placeImage';
+import { formatAverageRating, getRatingCount, getAverageRating } from '../utils/rating';
+import AccessibilityBadge from './AccessibilityBadge';
+import { formatRelativeOrShort } from '../utils/dateFormat';
+
+const PlaceCard = ({ place, priority = false }) => {
   const [isHovered, setIsHovered] = useState(false);
   const [imageError, setImageError] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
   const [isVisible, setIsVisible] = useState(false);
   const cardRef = useRef(null);
   const defaultImage = '/images/placeholder.jpg';
-  
+
+  /**
+   * The clock, read after mount rather than during render (`BUG-059`).
+   *
+   * `formatDate` below called `Date.now()` while rendering, which made this component's output a
+   * function of *when* it rendered. The card is server-rendered on both surfaces that use it and
+   * the home page is ISR with `revalidate: 300`, so cached markup could say "Yesterday" where the
+   * hydrating browser computed "Today" — the `BUG-044` / `BUG-046` hydration family a third time,
+   * on the one axis `IMP-122`'s lint rule cannot cover. Not the locale, not the zone: the clock.
+   *
+   * `null` until the effect runs, so **the server and the first client render produce identical
+   * markup by construction** rather than because a day boundary is unlikely to fall between them.
+   *
+   * This trades a `react-hooks/purity` violation for a `set-state-in-effect` one, deliberately and
+   * favourably: the first is a real hydration hazard, the second is the idiom this codebase already
+   * uses in 29 other places (`BL-146`). The visible cost is that a row less than seven days old
+   * shows its absolute date for one frame before the relative label replaces it.
+   */
+  const [now, setNow] = useState(null);
+  useEffect(() => setNow(Date.now()), []);
+
   // Image loading statuses
   const [loadStatus, setLoadStatus] = useState('pending'); // 'pending', 'loading', 'loaded', 'error'
 
@@ -29,18 +54,17 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
   const isValidPlace = place && place.id && place.name;
 
   // Get proper image URL for main image with optional cache busting in development
+  // The API now returns an absolute CDN url or null, so there is no proxy hop left to take
+  // (IMP-037). When there is no image, render the local placeholder directly — previously this
+  // fell through to `/api/places/:id/image`, which cost three server hops and two database
+  // queries only to end up serving that same placeholder.
+  //
+  // The `?t=${Date.now()}` cache-buster is gone with it. It was meant to be development-only, but
+  // it was evaluated on every render, so any re-render produced a new URL and re-downloaded the
+  // image — and it made the browser cache useless for the whole session.
   const getImageUrl = () => {
-    const cacheBuster = process.env.NODE_ENV === 'development' ? `?t=${Date.now()}` : '';
-    
-    // Prefer Cloudinary URLs or primary_image_url first
-    if (place.primary_image_url && !imageError) return `${place.primary_image_url}${cacheBuster}`;
-    if (place.image_url && !imageError) return `${place.image_url}${cacheBuster}`;
-    
-    // Fallback to API endpoint
-    if (isValidPlace && !imageError) return `/api/places/${place.id}/image${cacheBuster}`;
-    
-    // Ultimate fallback
-    return defaultImage;
+    if (imageError) return defaultImage;
+    return getPlaceImageUrl(place, defaultImage);
   };
 
   // Handle image error with advanced retry logic
@@ -48,7 +72,7 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
     console.warn(`Image failed to load for place: ${place.name || 'Unknown'}`);
     setImageError(true);
     setLoadStatus('error');
-    
+
     if (e && e.target) {
       e.target.src = defaultImage;
     }
@@ -60,46 +84,26 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
     setLoadStatus('loaded');
   };
 
-  // Format date for display with relative time option
-  const formatDate = (dateString) => {
-    try {
-      const date = new Date(dateString);
-      const now = new Date();
-      const diffTime = Math.abs(now - date);
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-      
-      // Show relative time for recent items
-      if (diffDays < 7) {
-        if (diffDays === 0) return 'Today';
-        if (diffDays === 1) return 'Yesterday';
-        return `${diffDays} days ago`;
-      }
-      
-      // Standard date format for older items
-      return date.toLocaleDateString(undefined, {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric'
-      });
-    } catch (e) {
-      return 'Unknown date';
-    }
-  };
+  // Dates, all of them, from the module that owns dates (`IMP-122`). The relative branch used to
+  // live here and read the clock during render; it is now `formatRelativeOrShort`, which takes
+  // `now` as an argument and is therefore a pure function that can be tested at a boundary rather
+  // than merely near one (`BUG-059`).
+  const formatDate = (dateString) => formatRelativeOrShort(dateString, now);
 
-  // Calculate and format average rating
+  // Colour coding compares numbers, not strings. The previous version compared the *formatted*
+  // value ("4.5" >= 4.5), which JavaScript coerces — so it happened to work, and would have
+  // stopped working the moment the format gained a suffix.
   const getRatingDisplay = () => {
-    if (!place.rating_count || place.rating_count === 0) return null;
-    
-    const avgRating = (place.rating_sum / place.rating_count).toFixed(1);
-    
-    // Color coding based on rating
+    const average = getAverageRating(place);
+    if (average === null) return null;
+
     let colorClass = 'bg-yellow-500';
-    if (avgRating >= 4.5) colorClass = 'bg-green-500';
-    else if (avgRating < 3) colorClass = 'bg-orange-500';
-    
+    if (average >= 4.5) colorClass = 'bg-green-500';
+    else if (average < 3) colorClass = 'bg-orange-500';
+
     return {
-      value: avgRating,
-      count: place.rating_count,
+      value: formatAverageRating(place),
+      count: getRatingCount(place),
       colorClass
     };
   };
@@ -109,7 +113,7 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
   // Intersection Observer to detect when card is visible
   useEffect(() => {
     if (!cardRef.current) return;
-    
+
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
@@ -120,14 +124,10 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
       },
       { threshold: 0.1 }
     );
-    
+
     observer.observe(cardRef.current);
-    
-    return () => {
-      if (cardRef.current) {
-        observer.disconnect();
-      }
-    };
+
+    return () => observer.disconnect();
   }, []);
 
   // Shorten long text with ellipsis
@@ -168,13 +168,13 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
       onHoverStart={() => setIsHovered(true)}
       onHoverEnd={() => setIsHovered(false)}
       initial={{ opacity: 0, y: 20 }}
-      animate={{ 
-        opacity: isVisible ? 1 : 0, 
-        y: isVisible ? 0 : 20 
+      animate={{
+        opacity: isVisible ? 1 : 0,
+        y: isVisible ? 0 : 20
       }}
-      transition={{ 
-        duration: 0.4, 
-        ease: [0.4, 0, 0.2, 1] 
+      transition={{
+        duration: 0.4,
+        ease: [0.4, 0, 0.2, 1]
       }}
     >
       <Link href={`/places/${place.id}`} className="block h-full">
@@ -184,7 +184,7 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
             {/* Loading State */}
             <AnimatePresence mode="wait">
               {(loadStatus === 'pending' || loadStatus === 'loading') && !imageLoaded && (
-                <motion.div 
+                <motion.div
                   className="absolute inset-0 bg-gray-100 flex items-center justify-center z-10"
                   initial={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
@@ -194,7 +194,7 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
                     {loadStatus === 'loading' ? (
                       <motion.div
                         animate={{ rotate: 360 }}
-                        transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
+                        transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
                       >
                         <FiLoader className="h-8 w-8 text-primary-500 mx-auto" />
                       </motion.div>
@@ -206,7 +206,7 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
                 </motion.div>
               )}
             </AnimatePresence>
-            
+
             {/* Main Image */}
             <div className="absolute inset-0 bg-gray-50">
               {isVisible && (
@@ -218,14 +218,14 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
                     ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
                   onError={handleImageError}
                   onLoad={handleImageLoad}
-                  loading={priority ? "eager" : "lazy"}
+                  loading={priority ? 'eager' : 'lazy'}
                 />
               )}
             </div>
-            
+
             {/* Gradient Overlay */}
             <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/30 to-transparent opacity-80 group-hover:opacity-90 transition-opacity duration-300"></div>
-            
+
             {/* Main Details */}
             <div className="absolute bottom-0 left-0 right-0 p-4 text-white">
               <h3 className="text-xl font-bold mb-1 line-clamp-1 group-hover:underline decoration-2 underline-offset-2 transition-all">
@@ -237,10 +237,12 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
                   {place.location}
                   {place.district && `, ${place.district}`}
                 </span>
-                
+
                 {/* Rating Badge */}
                 {rating && (
-                  <div className={`ml-auto flex items-center ${rating.colorClass} text-white rounded-full px-2 py-0.5 text-xs`}>
+                  <div
+                    className={`ml-auto flex items-center ${rating.colorClass} text-white rounded-full px-2 py-0.5 text-xs`}
+                  >
                     <FiStar className="mr-1" />
                     <span>{rating.value}</span>
                   </div>
@@ -248,7 +250,7 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
               </div>
             </div>
           </div>
-          
+
           {/* Theme/Tag Badges */}
           {(place.themes || place.tags) && (
             <div className="absolute top-3 left-3 flex flex-wrap gap-1 max-w-[75%] z-10">
@@ -266,7 +268,7 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
                     </motion.span>
                   ))}
                   {place.themes.length > 2 && (
-                    <motion.span 
+                    <motion.span
                       initial={{ opacity: 0, scale: 0.8 }}
                       animate={{ opacity: 1, scale: 1 }}
                       transition={{ delay: 0.4 }}
@@ -290,7 +292,7 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
                     </motion.span>
                   ))}
                   {place.tags.length > 2 && (
-                    <motion.span 
+                    <motion.span
                       initial={{ opacity: 0, scale: 0.8 }}
                       animate={{ opacity: 1, scale: 1 }}
                       transition={{ delay: 0.4 }}
@@ -303,10 +305,18 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
               ) : null}
             </div>
           )}
-          
+
+          {/* Step-free access (`FV-029`). Bottom-left, clear of the theme chips top-left and the
+              location badge top-right, and above the gradient so the date stays readable. Renders
+              nothing at all for an unsurveyed place — an absent badge means nobody checked, and a
+              greyed-out one would read as a verdict. */}
+          <div className="absolute bottom-3 left-3 z-20">
+            <AccessibilityBadge place={place} />
+          </div>
+
           {/* Location Badge */}
           {(place.state || place.district) && (
-            <motion.div 
+            <motion.div
               className="absolute top-3 right-3 z-10"
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
@@ -317,7 +327,7 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
               </span>
             </motion.div>
           )}
-          
+
           {/* View Details Button */}
           <motion.div
             className="absolute bottom-3 right-3 z-20"
@@ -330,10 +340,10 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
               View Details
             </span>
           </motion.div>
-          
+
           {/* Image Load Status Indicator */}
           {loadStatus === 'loaded' && (
-            <motion.div 
+            <motion.div
               className="absolute top-3 left-1/2 -translate-x-1/2 z-20"
               initial={{ opacity: 1, y: 0 }}
               animate={{ opacity: 0, y: -10 }}
@@ -345,7 +355,7 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
               </span>
             </motion.div>
           )}
-          
+
           {/* Card Content */}
           <div className="p-5 flex-grow flex flex-col">
             {/* Description */}
@@ -360,30 +370,45 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
             {/* Responsive Details Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-2 mb-2">
               {/* Custom Keys */}
-              {place.custom_keys && typeof place.custom_keys === 'object' && Object.keys(place.custom_keys).length > 0 && (
-                <div className="col-span-1">
-                  <h4 className="text-xs font-semibold text-gray-700 mb-1 flex items-center">
-                    <FiInfo className="mr-1 text-primary-500" />
-                    Details:
-                  </h4>
-                  <div className="space-y-1">
-                    {Object.entries(place.custom_keys)
-                      .filter(([key]) => !['created_by', 'created_at', 'updated_by', 'updated_at'].includes(key))
-                      .slice(0, 2)
-                      .map(([key, value]) => (
-                        <div key={key} className="flex text-xs">
-                          <span className="font-medium text-gray-700 mr-1">{key}:</span>
-                          <span className="text-gray-600 truncate">{value}</span>
+              {place.custom_keys &&
+                typeof place.custom_keys === 'object' &&
+                Object.keys(place.custom_keys).length > 0 && (
+                  <div className="col-span-1">
+                    <h4 className="text-xs font-semibold text-gray-700 mb-1 flex items-center">
+                      <FiInfo className="mr-1 text-primary-500" />
+                      Details:
+                    </h4>
+                    <div className="space-y-1">
+                      {Object.entries(place.custom_keys)
+                        .filter(
+                          ([key]) =>
+                            !['created_by', 'created_at', 'updated_by', 'updated_at'].includes(key)
+                        )
+                        .slice(0, 2)
+                        .map(([key, value]) => (
+                          <div key={key} className="flex text-xs">
+                            <span className="font-medium text-gray-700 mr-1">{key}:</span>
+                            <span className="text-gray-600 truncate">{value}</span>
+                          </div>
+                        ))}
+                      {Object.keys(place.custom_keys).filter(
+                        (key) =>
+                          !['created_by', 'created_at', 'updated_by', 'updated_at'].includes(key)
+                      ).length > 2 && (
+                        <div className="text-xs text-primary-600 font-medium hover:underline cursor-pointer">
+                          +
+                          {Object.keys(place.custom_keys).filter(
+                            (key) =>
+                              !['created_by', 'created_at', 'updated_by', 'updated_at'].includes(
+                                key
+                              )
+                          ).length - 2}{' '}
+                          more details
                         </div>
-                      ))}
-                    {Object.keys(place.custom_keys).filter(key => !['created_by', 'created_at', 'updated_by', 'updated_at'].includes(key)).length > 2 && (
-                      <div className="text-xs text-primary-600 font-medium hover:underline cursor-pointer">
-                        +{Object.keys(place.custom_keys).filter(key => !['created_by', 'created_at', 'updated_by', 'updated_at'].includes(key)).length - 2} more details
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
               {/* Tags list */}
               {place.tags && Array.isArray(place.tags) && place.tags.length > 0 && (
@@ -414,32 +439,34 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
             {/* Footer */}
             <div className="mt-auto pt-3 border-t border-gray-100 flex flex-wrap justify-between items-center text-xs text-gray-500">
               <div className="flex items-center">
-                <FiCalendar className="mr-1 text-gray-400" />
+                <FiCalendar className="mr-1 text-gray-500" />
                 <span className="whitespace-nowrap">{formatDate(place.created_at)}</span>
               </div>
-              
+
               {place.updated_at && place.updated_at !== place.created_at && (
-                <div className="flex items-center text-xs text-gray-400 mr-2">
+                <div className="flex items-center text-xs text-gray-500 mr-2">
                   <FiClock className="mr-1" />
                   <span>Updated {formatDate(place.updated_at)}</span>
                 </div>
               )}
-              
+
               {place.rating_count > 0 ? (
                 <div className="flex items-center">
-                  <FiStar className={`mr-1 ${rating && parseFloat(rating.value) >= 4 ? 'text-yellow-500' : 'text-gray-400'}`} />
+                  <FiStar
+                    className={`mr-1 ${rating && parseFloat(rating.value) >= 4 ? 'text-yellow-500' : 'text-gray-500'}`}
+                  />
                   <span>
                     {place.rating_count} {place.rating_count === 1 ? 'review' : 'reviews'}
                   </span>
                 </div>
               ) : (
                 <div className="flex items-center">
-                  <FiInfo className="mr-1 text-gray-400" />
+                  <FiInfo className="mr-1 text-gray-500" />
                   <span>No reviews yet</span>
                 </div>
               )}
             </div>
-            
+
             {/* Image Status */}
             {place.primary_image_url && (
               <div className="absolute top-1 left-1 z-10">
@@ -456,4 +483,16 @@ const PlaceCard = ({ place, timestamp, username, priority = false }) => {
   );
 };
 
-export default PlaceCard;
+/**
+ * Memoised (IMP-045).
+ *
+ * The browse grid renders this component once per result, and each instance carries ~11
+ * motion elements, an IntersectionObserver and date formatting. Browse holds a lot of state that
+ * has nothing to do with any card — hover flags, the sort menu, the loading flag, the filter
+ * panel — and every one of those changes re-rendered every visible card, because there was no
+ * React.memo anywhere in the codebase.
+ *
+ * The default shallow comparison is the right one here: `place` is a row object replaced
+ * wholesale when the query changes, and the remaining props are primitives.
+ */
+export default memo(PlaceCard);

@@ -1,62 +1,33 @@
-const db = require('../config/db');
+const pool = require('../config/db');
 
 /**
- * Create a new user in the database
- * @param {Object} userData - User data
- * @returns {Promise<Object>} - Newly created user
+ * Reads about the signed-in traveller themselves, as opposed to what they have planned.
+ *
+ * One function today. It has its own file rather than living in `tripModel` because it answers a
+ * question about a **person**, not about a trip — and `tripModel`'s entire discipline is that
+ * everything it touches is owned transitively through `trips` (`ADR-031`). A users lookup in there
+ * would be the first query in the file that is not, which is exactly how that rule stops being
+ * obvious to the next person reading it.
  */
-const createUser = async (userData) => {
-  const { firebase_uid, email, name } = userData;
-  
-  const result = await db.query(
-    `INSERT INTO users (firebase_uid, email, name) 
-     VALUES ($1, $2, $3) 
-     RETURNING id, firebase_uid, email, name, created_at`,
-    [firebase_uid, email, name]
-  );
-  
-  return result.rows[0];
-};
 
 /**
- * Get user by Firebase UID
- * @param {String} firebase_uid - Firebase UID
- * @returns {Promise<Object>} - User object
+ * What this traveller has said they need in order to get in (`FV-029` stage d).
+ *
+ * Returns the shape `feasibilityService.checkTrip` takes as its second argument, and **never
+ * `null`**: an absent row is a traveller who has stated nothing, which is a real answer and the one
+ * every row starts at. Returning `null` would push a falsy check into the engine, and the engine's
+ * job is to read data rather than to interpret its absence.
  */
-const getUserByFirebaseUid = async (firebase_uid) => {
-  const result = await db.query(
-    'SELECT id, firebase_uid, email, name, location, dob, created_at FROM users WHERE firebase_uid = $1',
-    [firebase_uid]
+const getAccessNeeds = async (firebaseUid) => {
+  const { rows } = await pool.query(
+    'SELECT requires_step_free, requires_accessible_restroom FROM users WHERE firebase_uid = $1',
+    [firebaseUid]
   );
-  
-  return result.rows[0] || null;
+
+  return {
+    requires_step_free: Boolean(rows[0]?.requires_step_free),
+    requires_accessible_restroom: Boolean(rows[0]?.requires_accessible_restroom)
+  };
 };
 
-/**
- * Update user profile
- * @param {String} firebase_uid - Firebase UID
- * @param {Object} userData - User data to update
- * @returns {Promise<Object>} - Updated user
- */
-const updateUser = async (firebase_uid, userData) => {
-  const { name, location, dob } = userData;
-  
-  const result = await db.query(
-    `UPDATE users 
-     SET name = COALESCE($1, name), 
-         location = COALESCE($2, location), 
-         dob = COALESCE($3, dob),
-         updated_at = NOW() 
-     WHERE firebase_uid = $4 
-     RETURNING id, firebase_uid, email, name, location, dob, created_at, updated_at`,
-    [name, location, dob, firebase_uid]
-  );
-  
-  return result.rows[0];
-};
-
-module.exports = {
-  createUser,
-  getUserByFirebaseUid,
-  updateUser,
-};
+module.exports = { getAccessNeeds };

@@ -1,0 +1,48 @@
+name: Feature request
+description: Propose something EasyTrip should be able to do
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before writing: `README.md` has a **Not Yet Implemented** section and a **Roadmap**, and
+        several things that look missing are deliberately absent with a reason attached. Worth a
+        skim — it may already be there, or already ruled out.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What can't you do today
+      description: |
+        The situation, not the solution. "I want to know whether a place is reachable in a
+        wheelchair" is more useful than "add an accessibility field", because it leaves room for
+        the answer to be better than the one you had in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: Roughly what it would look like to use. A sketch is fine.
+
+  - type: textarea
+    id: unknowns
+    attributes:
+      label: What would it need to be honest about
+      description: |
+        The question this project asks of every feature. If the data can be missing, stale,
+        estimated or wrong — what should the interface say then?
+
+        This is not a formality. A weather panel here was once **deleted** rather than shipped with
+        a plausible hardcoded forecast, and a settlement engine ships `optimal: false` because
+        minimising transfers is NP-hard and claiming otherwise would be a lie in a list of amounts
+        people hand each other.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything you considered and rejected
+      description: Optional, and often the most useful box on this form.

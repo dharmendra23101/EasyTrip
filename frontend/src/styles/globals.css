@@ -4,19 +4,80 @@
 @import 'tailwindcss/utilities';
 
 /* Your other styles */
+/* The font stack lives in tailwind.config.js (fontFamily.sans) so the loaded Inter is actually
+   applied. Hardcoding it here overrode that config, which is why the downloaded font never
+   showed up (IMP-028). */
 html,
 body {
   padding: 0;
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Oxygen,
-    Ubuntu, Cantarell, Fira Sans, Droid Sans, Helvetica Neue, sans-serif;
 }
-html,
-
 
 a {
   color: inherit;
   text-decoration: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Accessibility baseline (IMP-080, IMP-082)
+   --------------------------------------------------------------------------- */
+
+/* Keyboard focus must always be visible. 40 places in this codebase set
+   `focus:outline-none`, and 17 of them never added a `focus:ring` to replace it — so
+   tabbing through those controls showed nothing at all. This is the safety net: any
+   element focused via the keyboard gets a ring even if its utility classes removed the
+   native outline.
+
+   `:focus-visible` rather than `:focus` deliberately — a mouse click should not draw a
+   ring, which is the reason people reach for `outline: none` in the first place. Anything
+   that sets its own `focus-visible:ring-*` still wins, because Tailwind utilities carry
+   higher specificity than this element selector. */
+:focus-visible {
+  outline: 2px solid theme(colors.primary.600);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Respect the OS "reduce motion" setting. This project renders 403 framer-motion elements
+   and several CSS keyframe animations, none of which honoured it.
+
+   framer-motion is handled separately by <MotionConfig reducedMotion="user"> in _app.jsx —
+   its animations are JS-driven inline styles that CSS cannot reach. This block covers the
+   rest: CSS transitions, the spinner, and the custom keyframes below.
+
+   Animations are reduced to ~0 rather than removed, because `animation: none` can leave an
+   element stuck in its pre-animation state (invisible, if the animation was a fade-in).
+   Infinite loaders keep running — a spinner communicates "working", and freezing it would
+   be a functional loss rather than a motion reduction. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .animate-spin,
+  .animate-spin-slow {
+    animation-duration: 1.5s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
+
+/* Utility for skip links and other content that must exist for assistive technology but
+   only become visible on focus. */
+.sr-only-focusable:not(:focus):not(:focus-within) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
 }
 
 * {
@@ -50,7 +111,6 @@ a {
   transform: scale(1.05);
 }
 
-
 /* Additional Animation Classes */
 @keyframes spin-slow {
   to {
@@ -78,12 +138,12 @@ a {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #0ea5e9;
+  background: theme(colors.primary.500);
   border-radius: 5px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #0284c7;
+  background: theme(colors.primary.600);
 }
 
 /* Glassmorphism */
@@ -103,7 +163,9 @@ a {
 
 .card-hover:hover {
   transform: translateY(-10px);
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  box-shadow:
+    0 20px 25px -5px rgba(0, 0, 0, 0.1),
+    0 10px 10px -5px rgba(0, 0, 0, 0.04);
 }
 
 /* Custom animations */
@@ -124,7 +186,7 @@ a {
 
 /* Gradient Text */
 .gradient-text {
-  background: linear-gradient(90deg, #0ea5e9 0%, #3b82f6 100%);
+  background: linear-gradient(90deg, theme(colors.primary.500) 0%, #3b82f6 100%);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -134,7 +196,6 @@ a {
   background-image: radial-gradient(circle, #ffffff 1px, transparent 1px);
   background-size: 20px 20px;
 }
-
 
 .bg-pattern-dots {
   background-image: radial-gradient(circle, #ffffff 1px, transparent 1px);

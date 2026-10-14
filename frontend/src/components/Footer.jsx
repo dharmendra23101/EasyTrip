@@ -1,53 +1,66 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { FiMapPin, FiMail, FiPhone, FiFacebook, FiInstagram, FiTwitter, FiLinkedin, FiYoutube, FiArrowRight } from 'react-icons/fi';
+import { FiArrowRight } from 'react-icons/fi';
+import { subscribeToNewsletter } from '../services/newsletterService';
+import { useTranslation } from '../i18n';
 
 const Footer = () => {
+  const { t } = useTranslation();
   const [email, setEmail] = useState('');
   const [subscribed, setSubscribed] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
 
-  const handleSubscribe = (e) => {
+  // This form used to set `subscribed` and drop the address on the floor (IMP-023). It now posts
+  // to a real endpoint, and the confirmation only appears once the server has stored the address.
+  const handleSubscribe = async (e) => {
     e.preventDefault();
-    if (email) {
-      // Here you would normally send the email to your API
+    if (!email || submitting) return;
+
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      await subscribeToNewsletter(email, 'footer');
       setSubscribed(true);
       setEmail('');
-      // Reset the subscribed state after 5 seconds
+      // The form returns after a few seconds so the same visitor can subscribe another address.
       setTimeout(() => setSubscribed(false), 5000);
+    } catch (err) {
+      setError(err?.message || 'Could not complete your subscription. Please try again.');
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  const socialLinks = [
-    { icon: <FiFacebook className="h-5 w-5" />, href: "#", name: "Facebook" },
-    { icon: <FiInstagram className="h-5 w-5" />, href: "#", name: "Instagram" },
-    { icon: <FiTwitter className="h-5 w-5" />, href: "#", name: "Twitter" },
-    { icon: <FiLinkedin className="h-5 w-5" />, href: "#", name: "LinkedIn" },
-    { icon: <FiYoutube className="h-5 w-5" />, href: "#", name: "YouTube" },
-  ];
+  // Social icons used to be five `href="#"` placeholders. EasyTrip has no social accounts, so the
+  // whole row is gone rather than linking nowhere (IMP-025). Restore it when accounts exist.
 
+  // Labels are keys, resolved at render. The destinations below are deliberately NOT keyed:
+  // they carry `?location=Agra`, which matches an English value in the database, so a translated
+  // label would sit on a link that searches for something else (IMP-114).
   const quickLinks = [
-    { name: "Home", href: "/" },
-    { name: "Destinations", href: "/destinations" },
-    { name: "About Us", href: "/about" },
-    { name: "Contact", href: "/contact" },
-    { name: "Privacy Policy", href: "/privacy" },
-    { name: "Terms of Service", href: "/terms" },
+    { key: 'footer.home', href: '/' },
+    { key: 'footer.destinations', href: '/browse' },
+    { key: 'footer.aboutUs', href: '/about' }
   ];
 
+  // These were `href="#"`. Browse reads a `location` query param, so they now run a real search
+  // instead of doing nothing.
   const popularDestinations = [
-    { name: "Agra", href: "#" },
-    { name: "Jaipur", href: "#" },
-    { name: "Goa", href: "#" },
-    { name: "Mumbai", href: "#" },
-    { name: "Delhi", href: "#" },
+    { name: 'Agra', href: '/browse?location=Agra' },
+    { name: 'Jaipur', href: '/browse?location=Jaipur' },
+    { name: 'Goa', href: '/browse?location=Goa' },
+    { name: 'Mumbai', href: '/browse?location=Mumbai' },
+    { name: 'Delhi', href: '/browse?location=Delhi' }
   ];
 
   return (
     <footer className="relative bg-gray-900 text-white overflow-hidden">
       {/* Decorative Elements */}
       <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-primary-500 via-yellow-400 to-primary-600"></div>
-      
+
       <div className="absolute top-20 right-20 w-72 h-72 bg-primary-600 rounded-full opacity-10 blur-3xl"></div>
       <div className="absolute -bottom-20 -left-20 w-80 h-80 bg-blue-600 rounded-full opacity-10 blur-3xl"></div>
 
@@ -64,35 +77,25 @@ const Footer = () => {
               <h2 className="text-2xl font-bold text-white">EasyTrip</h2>
             </div>
             <p className="text-gray-300 mb-6 max-w-md">
-              Discover amazing destinations around the world with EasyTrip. We help you find the perfect places to visit, with detailed information and beautiful imagery.
+              Discover destinations across India with EasyTrip — curated places to visit, with real
+              traveller ratings and detailed information.
             </p>
-            
-            {/* Social Media Links */}
-            <div className="flex space-x-4">
-              {socialLinks.map((social, index) => (
-                <motion.a
-                  key={index}
-                  href={social.href}
-                  className="flex items-center justify-center w-10 h-10 rounded-full bg-gray-800 text-gray-300 hover:bg-primary-600 hover:text-white transition-colors"
-                  whileHover={{ y: -5, backgroundColor: "#0EA5E9", color: "#FFFFFF" }}
-                  whileTap={{ scale: 0.9 }}
-                  title={social.name}
-                >
-                  {social.icon}
-                </motion.a>
-              ))}
-            </div>
           </div>
 
           {/* Quick Links */}
           <div className="lg:col-span-1">
-            <h3 className="text-lg font-semibold mb-6 border-b border-gray-700 pb-2">Quick Links</h3>
+            <h3 className="text-lg font-semibold mb-6 border-b border-gray-700 pb-2">
+              {t('footer.quickLinks')}
+            </h3>
             <ul className="space-y-3">
               {quickLinks.map((link, index) => (
                 <motion.li key={index} whileHover={{ x: 5 }}>
-                  <Link href={link.href} className="text-gray-300 hover:text-primary-400 transition-colors flex items-center">
+                  <Link
+                    href={link.href}
+                    className="text-gray-300 hover:text-primary-400 transition-colors flex items-center"
+                  >
                     <span className="text-xs mr-2">›</span>
-                    {link.name}
+                    {t(link.key)}
                   </Link>
                 </motion.li>
               ))}
@@ -101,11 +104,16 @@ const Footer = () => {
 
           {/* Popular Destinations */}
           <div className="lg:col-span-1">
-            <h3 className="text-lg font-semibold mb-6 border-b border-gray-700 pb-2">Popular Destinations</h3>
+            <h3 className="text-lg font-semibold mb-6 border-b border-gray-700 pb-2">
+              {t('footer.popularDestinations')}
+            </h3>
             <ul className="space-y-3">
               {popularDestinations.map((destination, index) => (
                 <motion.li key={index} whileHover={{ x: 5 }}>
-                  <Link href={destination.href} className="text-gray-300 hover:text-primary-400 transition-colors flex items-center">
+                  <Link
+                    href={destination.href}
+                    className="text-gray-300 hover:text-primary-400 transition-colors flex items-center"
+                  >
                     <span className="text-xs mr-2">›</span>
                     {destination.name}
                   </Link>
@@ -120,7 +128,7 @@ const Footer = () => {
             <p className="text-gray-300 mb-4 text-sm">
               Subscribe to our newsletter for the latest updates and travel inspiration.
             </p>
-            
+
             {subscribed ? (
               <motion.div
                 initial={{ opacity: 0, y: 10 }}
@@ -135,54 +143,44 @@ const Footer = () => {
                   <input
                     type="email"
                     placeholder="Your email"
-                    className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-l-lg text-white placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-primary-500"
+                    aria-label="Email address for newsletter"
+                    className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-l-lg text-white placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-primary-500 disabled:opacity-60"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                    disabled={submitting}
                     required
                   />
                   <motion.button
                     type="submit"
-                    className="px-3 py-2 bg-primary-600 text-white rounded-r-lg"
-                    whileHover={{ backgroundColor: "#0284C7" }}
+                    disabled={submitting}
+                    aria-label="Subscribe to newsletter"
+                    className="px-3 py-2 bg-primary-600 text-white rounded-r-lg disabled:opacity-60"
+                    whileHover={{ backgroundColor: '#0284C7' }}
                     whileTap={{ scale: 0.95 }}
                   >
                     <FiArrowRight />
                   </motion.button>
                 </div>
+                {error && (
+                  <p role="alert" className="text-red-400 text-sm">
+                    {error}
+                  </p>
+                )}
               </form>
             )}
-            
-            {/* Contact Info */}
-            <div className="mt-6 space-y-4">
-              <div className="flex items-start">
-                <FiMapPin className="h-5 w-5 mr-3 text-primary-500 mt-0.5" />
-                <span className="text-gray-300 text-sm">
-                  123 Travel Street, Tourism City, 12345
-                </span>
-              </div>
-              <div className="flex items-center">
-                <FiPhone className="h-5 w-5 mr-3 text-primary-500" />
-                <span className="text-gray-300 text-sm">+1 (123) 456-7890</span>
-              </div>
-              <div className="flex items-center">
-                <FiMail className="h-5 w-5 mr-3 text-primary-500" />
-                <span className="text-gray-300 text-sm">info@easytrip.com</span>
-              </div>
-            </div>
           </div>
         </div>
 
         {/* Footer Bottom */}
         <div className="mt-12 pt-8 border-t border-gray-800">
           <div className="flex flex-col md:flex-row justify-between items-center">
-            <p className="text-gray-400 text-sm mb-4 md:mb-0">
+            {/* Privacy / Terms / Cookie links lived here and all three 404'd. They are removed
+                rather than written, because a fabricated privacy policy is a worse problem than a
+                missing one — and this same sprint is deleting invented content elsewhere (IMP-027).
+                They return when there are real documents to link to. */}
+            <p className="text-gray-400 text-sm">
               &copy; {new Date().getFullYear()} EasyTrip. All rights reserved.
             </p>
-            <div className="flex space-x-6">
-              <Link href="/privacy" className="text-gray-400 hover:text-primary-400 text-sm">Privacy Policy</Link>
-              <Link href="/terms" className="text-gray-400 hover:text-primary-400 text-sm">Terms of Service</Link>
-              <Link href="/cookies" className="text-gray-400 hover:text-primary-400 text-sm">Cookie Policy</Link>
-            </div>
           </div>
         </div>
       </div>

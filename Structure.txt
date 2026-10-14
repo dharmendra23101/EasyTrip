@@ -1,127 +1,57 @@
+EasyTrip — repository structure
+Regenerated 2026-08-10 from the tracked file list; scripts/ refreshed 2026-08-15;
+framework versions corrected 2026-09-07 (they still said Express 4 / Next 13 / React 18 after
+Sprints 8.53-8.54 moved them, and `check:stack-versions` now fails the build if they drift again). Directory-level rather than
+file-by-file: the previous version named individual files and 14 of the 37 it
+listed no longer existed, because the Phase 5 cleanup deleted them and nothing
+updated this file. A tree that has to be hand-edited on every refactor will
+drift again, so this one describes shape and responsibility instead.
+
 EasyTrip/
-├── backend/                     # Node.js Express backend
-│   ├── app.js                   # Express app entry point
-│   ├── package.json
-│   ├── script/
-│   │   └── make-admin.js        # Script to create admin users
+├── backend/                      Express 5 API, CommonJS, PostgreSQL
+│   ├── app.js                    Entry point: middleware, routes, error handler.
+│   │                             Listens only when it is the process entry point.
+│   ├── script/                   Operational scripts (migrations runner, make-admin)
 │   ├── src/
-│   │   ├── config/              # Configuration files
-│   │   │   ├── cloudinary.js    # Cloudinary config
-│   │   │   ├── db.js            # Database configuration
-│   │   │   ├── firebase.js      # Firebase client config
-│   │   │   ├── firebase-admin.js # Firebase admin SDK config
-│   │   │   └── schema.sql       # Database schema
-│   │   ├── controllers/         # Route handlers
-│   │   │   ├── adminController.js
-│   │   │   ├── authController.js
-│   │   │   ├── placeController.js
-│   │   │   └── userController.js
-│   │   ├── models/              # Database models
-│   │   │   ├── adminModel.js
-│   │   │   ├── placeModel.js
-│   │   │   └── userModel.js
-│   │   ├── routes/              # API routes
-│   │   │   ├── adminRoutes.js
-│   │   │   ├── authRoutes.js
-│   │   │   ├── placeRoutes.js
-│   │   │   └── userRoutes.js
-│   │   ├── services/            # Business logic
-│   │   │   └── placeService.js
-│   │   └── utils/               # Helpers and middleware
-│   │       ├── authMiddleware.js
-│   │       ├── errorHandler.js
-│   │       └── multerConfig.js   # File upload config
-│   └── tmp/                     # Temporary file storage
+│   │   ├── config/               DB pool, Firebase Admin init, Cloudinary, env
+│   │   │                         validation, schema.sql, migrations/, seed.js
+│   │   ├── controllers/          Request handling, split by domain
+│   │   │                         (place / image / review / taxonomy, auth, admin,
+│   │   │                         newsletter) + controllers/helpers/
+│   │   ├── models/               Parameterized SQL data access
+│   │   ├── routes/               Route tables with express-validator rules
+│   │   └── utils/                Auth middleware, error handler, logging, multer
+│   └── tests/                    Jest + supertest against a real Postgres
 │
-├── frontend/                    # Next.js frontend
-│   ├── public/                  # Static files
-│   │   ├── images/              # Image assets
-│   │   │   ├── hero-bg.jpg
-│   │   │   ├── logo.png
-│   │   │   └── placeholder.jpg
-│   │   ├── favicon.ico
-│   │   ├── file.svg
-│   │   ├── globe.svg
-│   │   ├── next.svg
-│   │   ├── vercel.svg
-│   │   └── window.svg
+├── frontend/                     Next.js 16 (Pages Router), React 19, Tailwind
 │   ├── src/
-│   │   ├── components/          # Reusable components
-│   │   │   ├── ExploreMap.jsx   # Map component
-│   │   │   ├── Footer.jsx
-│   │   │   ├── GoogleOneTap.jsx # Google auth integration
-│   │   │   ├── ImageCarousel.jsx
-│   │   │   ├── ImageGallery.jsx
-│   │   │   ├── ImageUpload.jsx
-│   │   │   ├── ImageWithFallback.jsx
-│   │   │   ├── LoadingSpinner.jsx
-│   │   │   ├── MagazineGallery.jsx # Magazine-style gallery
-│   │   │   ├── Navbar.jsx
-│   │   │   ├── PlaceCard.jsx
-│   │   │   ├── PlaceCompactCard.jsx
-│   │   │   ├── PlaceFeatureCard.jsx
-│   │   │   ├── PlaceGalleryCard.jsx
-│   │   │   ├── PlaceList.jsx
-│   │   │   ├── RatingStars.jsx
-│   │   │   ├── RelatedPlaces.jsx
-│   │   │   ├── ReviewForm.jsx
-│   │   │   ├── ReviewList.jsx
-│   │   │   └── SearchBar.jsx
-│   │   ├── config/              # Configuration
-│   │   │   └── firebase.js      # Firebase config
-│   │   ├── context/             # React context
-│   │   │   ├── AuthContext.jsx  # Authentication context
-│   │   │   └── UserContext.jsx  # User data context
-│   │   ├── hooks/               # Custom hooks
-│   │   │   └── usePlaces.js     # Places data hook
-│   │   ├── pages/               # Pages & routing
-│   │   │   ├── _app.jsx         # App wrapper
-│   │   │   ├── _document.js     # Document definition
-│   │   │   ├── browse.jsx       # Browse destinations
-│   │   │   ├── browse.new.jsx   # New browse page
-│   │   │   ├── explore.jsx      # Explore page with map
-│   │   │   ├── index.jsx        # Home page
-│   │   │   ├── login.jsx        # Login page
-│   │   │   ├── profile.jsx      # User profile
-│   │   │   ├── signup.jsx       # Signup page
-│   │   │   ├── admin/           # Admin dashboard
-│   │   │   │   ├── addPlace.jsx
-│   │   │   │   ├── editPlace/
-│   │   │   │   │   └── [id].jsx # Edit place form
-│   │   │   │   ├── index.jsx    # Admin dashboard
-│   │   │   │   └── managePlaces.jsx
-│   │   │   ├── api/             # API routes
-│   │   │   │   ├── direct-image/
-│   │   │   │   │   └── [id].js  # Direct image endpoint
-│   │   │   │   ├── image/
-│   │   │   │   │   └── [id].js  # Image endpoint
-│   │   │   │   ├── image-proxy.js # Image proxy endpoint
-│   │   │   │   └── places/
-│   │   │   │       └── [id]/
-│   │   │   │           └── image.js # Place images endpoint
-│   │   │   └── places/          # Place pages
-│   │   │       └── [id].jsx     # Place details page
-│   │   ├── routes/              # Frontend routes
-│   │   │   └── authRoutes.js
-│   │   ├── services/            # API services
-│   │   │   ├── adminService.js
-│   │   │   ├── authService.js
-│   │   │   ├── placeService.js
-│   │   │   └── userService.js
-│   │   ├── styles/              # Styling
-│   │   │   └── globals.css      # Global styles
-│   │   └── utils/               # Utilities
-│   │       ├── auth.js          # Auth helpers
-│   │       └── placeCache.js    # Cache for places
-│   ├── .env.local               # Environment variables
-│   ├── .gitignore               # Git ignore file
-│   ├── eslint.config.mjs        # ESLint configuration
-│   ├── jsconfig.json            # JavaScript config
-│   ├── next.config.js           # Next.js config
-│   ├── package.json
-│   ├── postcss.config.js        # PostCSS config
-│   ├── README.md                # Project documentation
-│   └── tailwind.config.js       # Tailwind CSS config
+│   │   ├── components/           UI, grouped by feature: admin/, browse/, home/,
+│   │   │                         map/, place/, plus shared components
+│   │   ├── config/               Firebase client initialisation
+│   │   ├── constants/            Shared enumerations
+│   │   ├── context/              AuthContext — the app's auth contract
+│   │   ├── hooks/                Data and interaction hooks extracted from pages
+│   │   ├── pages/                Routes, including admin/ and places/[id]
+│   │   ├── services/             API client, one axios instance, one error shape
+│   │   ├── styles/               Global CSS
+│   │   └── utils/                Pure helpers: filters, dates, ratings, images
+│   ├── public/                   Static assets
+│   └── tests/                    Jest + React Testing Library (jsdom)
 │
-├── package.json                 # Root package.json for workspaces
-└── Structure.txt                # This file (project structure) 
+├── e2e/                          Playwright journeys against the real stack
+│   ├── global-setup.js           Provisions Postgres + API before the suite
+│   ├── global-teardown.js        Destroys them after
+│   └── tests/                    Browser specs
+│
+├── scripts/                      Repo-wide guards and generators:
+│                                 check-module-size (Phase 5 exit criterion),
+│                                 check-secrets, check-api-docs (README's route
+│                                 table vs the real routers), generate-pwa-icons
+├── .github/workflows/            CI: lint/build, component tests, migrations,
+│                                 API tests, E2E
+├── docker-compose.yml            Local Postgres for development
+├── playwright.config.js
+└── README.md
+
+Not in the public repository: `docs/` is a private engineering knowledge base
+(roadmap, audits, decisions, session notes) and is deliberately gitignored.

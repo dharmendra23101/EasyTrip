@@ -1,0 +1,30 @@
+# Line-ending policy (TD-019).
+#
+# The repository stores text as LF — 225 of 226 tracked text files already did, which this file
+# makes explicit rather than incidental. Without it, behaviour depends on each developer's
+# `core.autocrlf`, and on Windows that setting rewrites the working tree to CRLF on checkout. That
+# is what broke `npm run format:check` after a routine rebase: `.prettierrc` sets
+# `endOfLine: "lf"`, so a CRLF working tree fails the format gate while `git status` stays clean —
+# 109 files reported as modified that differed only by a carriage return.
+#
+# `eol=lf` (rather than bare `text=auto`) forces the *working tree* to LF too, so the checked-out
+# bytes are the committed bytes on every platform and the Prettier gate means the same thing
+# everywhere.
+#
+# One file was genuinely inconsistent and is normalized alongside this: `schema.sql` was committed
+# with CRLF. Verified content-identical afterwards — line endings only.
+
+* text=auto eol=lf
+
+# Explicitly binary, so git never attempts an end-of-line conversion on them. Corrupting an image
+# this way is silent: the file still opens in some viewers and fails in others.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.woff  binary
+*.woff2 binary
+*.pdf   binary
+*.zip   binary

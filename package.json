@@ -6,12 +6,34 @@
   "scripts": {
     "start": "concurrently \"npm run start:backend\" \"npm run start:frontend\"",
     "start:backend": "cd backend && npm run start",
-    "start:frontend": "cd frontend && npm run dev",
+    "start:frontend": "cd frontend && npm run start",
     "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
     "dev:backend": "cd backend && npm run dev",
     "dev:frontend": "cd frontend && npm run dev",
     "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install",
-    "build": "cd frontend && npm run build"
+    "build": "npm run build:frontend",
+    "build:frontend": "cd frontend && npm run build",
+    "migrate": "cd backend && npm run migrate",
+    "migrate:status": "cd backend && npm run migrate:status",
+    "migrate:dry-run": "cd backend && npm run migrate:dry-run",
+    "lint": "npm run lint:root && npm run lint:backend && npm run lint:frontend",
+    "lint:root": "eslint e2e scripts playwright.config.js --ext .js,.mjs",
+    "lint:backend": "cd backend && npm run lint",
+    "lint:frontend": "cd frontend && npm run lint",
+    "check:size": "node scripts/check-module-size.mjs",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "check:api-docs": "node scripts/check-api-docs.mjs",
+    "check:schema-docs": "node scripts/check-schema-docs.mjs",
+    "check:bundle-size": "node scripts/check-bundle-size.mjs",
+    "check:stack-versions": "node scripts/check-stack-versions.mjs",
+    "check:test-counts": "node scripts/check-test-counts.mjs",
+    "check:themes": "node scripts/check-theme-vocabulary.mjs",
+    "check:i18n": "node scripts/check-i18n.mjs",
+    "check:env-docs": "node scripts/check-env-docs.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "keywords": [
     "travel",
@@ -21,8 +43,15 @@
     "firebase"
   ],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "devDependencies": {
-    "concurrently": "^8.0.1"
+    "@playwright/test": "1.62.1",
+    "concurrently": "^9.2.0",
+    "eslint": "8.57.1",
+    "firebase-tools": "15.24.0",
+    "prettier": "^3.9.6"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

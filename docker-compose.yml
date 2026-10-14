@@ -1,0 +1,67 @@
+# Local Postgres for EasyTrip development (IMP-098).
+#
+# What this is for: getting a new contributor from `git clone` to a working database without
+# installing Postgres, creating a role, and hand-running schema.sql. Before this, "set up the
+# database" was an undocumented sequence that only worked if you already knew it.
+#
+#     docker compose up -d          # start Postgres, create the schema on first run
+#     npm run migrate               # bring the schema up to date
+#     npm run dev                   # backend + frontend
+#
+# Scope: THE DATABASE ONLY. The backend and frontend deliberately run on the host, because the
+# thing being developed benefits from a fast local reload loop and the thing being provisioned does
+# not. Containerising the app as well would mean rebuilding an image to see a code change, which is
+# how a compose file ends up unused.
+#
+# The matching DATABASE_URL for backend/.env — the credentials below are development-only and
+# deliberately weak, since the port is bound to loopback and the data is disposable:
+#
+#     DATABASE_URL=postgresql://easytrip:easytrip@localhost:5432/easytrip
+
+services:
+  postgres:
+    # Pinned to a major version, not `latest`: a new Postgres release should never change what a
+    # contributor gets from a file they did not edit.
+    image: postgres:16
+    container_name: easytrip-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: easytrip
+      POSTGRES_PASSWORD: easytrip
+      POSTGRES_DB: easytrip
+
+    ports:
+      # Bound to 127.0.0.1 rather than 0.0.0.0. The bare "5432:5432" form publishes the container
+      # on every interface, which on a laptop means the database is reachable from the coffee-shop
+      # network — with the weak development password above.
+      - '127.0.0.1:5432:5432'
+
+    volumes:
+      # Everything in this directory runs once, when the data directory is first created. It does
+      # NOT re-run on later `docker compose up`, so changing schema.sql has no effect on a database
+      # that already exists — that is what the migrations are for. To start over:
+      #     docker compose down -v && docker compose up -d
+      #
+      # Mounted read-only: the init scripts are the host's source files, and a container has no
+      # business writing to them.
+      - ./backend/src/config/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      # 02_seed.sql is intentionally absent — the seed script is IMP-095 in Phase 6. When it lands,
+      # mount it here and a fresh `docker compose up` produces a browsable app rather than an empty
+      # one.
+      - easytrip-pgdata:/var/lib/postgresql/data
+
+    healthcheck:
+      # `npm run migrate` immediately after `docker compose up` would otherwise race the container:
+      # the port is listening before Postgres is ready to accept queries. With this, `docker compose
+      # up --wait` returns only once the database genuinely answers.
+      test: ['CMD-SHELL', 'pg_isready -U easytrip -d easytrip']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  # A named volume, so `docker compose down` keeps the data and `docker compose down -v` is the
+  # explicit, deliberate way to throw it away.
+  easytrip-pgdata:

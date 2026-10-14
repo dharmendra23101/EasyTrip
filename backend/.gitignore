@@ -1,0 +1,36 @@
+# Secrets — never commit. Copy .env.example to .env and fill it in locally.
+.env
+.env.*
+!.env.example
+
+# Firebase service-account keys. The console downloads these as
+# <project-id>-firebase-adminsdk-<hash>-<id>.json; script/make-admin.js also
+# looks for backend/service-account.json.
+*service-account*.json
+*serviceAccount*.json
+*firebase-adminsdk*.json
+
+# Certificates and private keys
+*.pem
+*.key
+*.p12
+*.p8
+
+# Dependencies
+node_modules/
+
+# Multer disk-storage scratch — src/config/cloudinary.js creates backend/tmp/
+# and writes every upload there before pushing it to Cloudinary.
+tmp/
+uploads/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

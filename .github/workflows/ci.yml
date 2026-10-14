@@ -1,0 +1,522 @@
+# EasyTrip CI (IMP-096, repays TD-008)
+#
+# Nothing ran on push or PR before this. Every claim that the build passed was manual and
+# point-in-time — which is the same class of problem as `next lint` never having executed
+# (IMP-097): a quality gate everyone assumes exists and nothing enforces.
+#
+# Six jobs, deliberately separate so a failure names its own cause:
+#   lint-and-build  — does the code pass lint (all three configs), formatting and the module-size
+#                     criterion, and does the frontend compile
+#   migrations      — does the schema actually build from nothing, and are the migrations
+#                     re-runnable, checked against a real Postgres
+#   api-tests       — the backend suite against a real Postgres service container (IMP-092)
+#   frontend-tests  — the component and unit suite in jsdom (IMP-093)
+#   e2e             — real-browser journeys against the real stack (IMP-094)
+#   test-counts     — the README's assertion totals against what the three suites actually ran
+#                     (IMP-128); runs last because it consumes the other three jobs' output
+#
+# The test jobs are split rather than merged because they need different things: the API and E2E
+# suites need a database, the frontend suite needs neither and runs in parallel. Merging them would
+# make the fast one wait for the slow one's service container.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch makes the first run's answer irrelevant. Cancelling it keeps
+# queue time down and stops a stale red X sitting on a branch that has already been fixed.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-build:
+    name: Lint and build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Read from .nvmrc so CI and local can never drift apart — the version is stated once.
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      # `npm ci` rather than `npm install`: it installs exactly the lockfile and fails if
+      # package.json and the lockfile disagree, which is the drift that broke `npm ci` at the root
+      # until IMP-013 fixed it. Three separate installs because this is three manifests, not a
+      # workspace.
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      # The workspace files neither tier owns: e2e/, scripts/ and playwright.config.js. They had no
+      # ESLint at all until TD-021 — roughly 600 lines including the code that provisions a database
+      # and starts a server (see the root .eslintrc.js for why that matters).
+      - name: Lint workspace files (e2e, scripts)
+        run: npm run lint:root
+
+      - name: Lint backend
+        run: npm run lint
+        working-directory: backend
+
+      - name: Lint frontend
+        run: npm run lint
+        working-directory: frontend
+
+      # Restored in Sprint 5.6, once the repo-wide format actually landed (TD-016).
+      #
+      # It was deliberately absent from Sprint 5.2 to Sprint 5.5: Sprint 5.1 added Prettier and the
+      # format scripts without ever running them, so `prettier --check .` reported 63 files and this
+      # step would have been red on arrival — which is worse than a missing step, because a pipeline
+      # that is red for a known reason trains everyone to ignore red pipelines.
+      - name: Check formatting
+        run: npm run format:check
+
+      # Phase 5's exit criterion, enforced rather than re-measured by hand each sprint. It is an
+      # architecture guard, not a test: it catches a page or controller re-absorbing the
+      # responsibilities seven sprints of extraction removed. The single waiver is named in the
+      # script with the id that justifies it.
+      - name: Check module size (Phase 5 exit criterion)
+        run: npm run check:size
+
+      # Detection, not remediation. backend/.env is already in three commits of public history
+      # (SECURITY_AUDIT §12.0) and no CI step can undo that — rotation is the fix, and it is the
+      # owner's call. What this stops is the *next* one, and the specific failure it guards is the
+      # one that actually happened: a .gitignore rule does nothing about a file already tracked.
+      - name: Scan for tracked credentials
+        run: npm run check:secrets
+
+      # The README's API table opens by claiming to be "the complete set of Express routes the
+      # backend actually registers". That is a falsifiable sentence, and on 2026-08-15 it was false
+      # by 23 routes — trips, wishlist, weather, typeahead, moderation, analytics and geocoding had
+      # all shipped without it, and nothing failed because nothing was checking. This checks, in
+      # both directions: an undocumented route and a documented-but-nonexistent one both fail.
+      - name: Check the API reference matches the routes
+        run: npm run check:api-docs
+
+      # The same guarantee for environment variables, and it was a manual "diff this grep against
+      # the template" line in RELEASE_CHECKLIST until 2026-08-16 — which is to say, a check nobody
+      # ran between releases. Running it once found both directions already broken: five phantom
+      # POSTGRES_* variables the README claimed were "still read by src/config/db.js" (they are
+      # not), and API_URL, a deliberate server-only override, documented nowhere at all.
+      - name: Check the environment templates match the code
+        run: npm run check:env-docs
+
+      # The same guarantee again, for the schema. The README's ER diagram says it holds every table
+      # in the database; on 2026-09-07 it was missing `admin_audit_log`, which migration 022 added,
+      # three controllers write to, and an admin page reads — and the sentence above it still said
+      # "sixteen". The migrations README had also stopped describing files at 010, leaving twelve
+      # undocumented. Both directions fail here, and so does a stale count.
+      - name: Check the schema documentation matches the migrations
+        run: npm run check:schema-docs
+
+      # Badges and one-line tier descriptions are hand-typed numbers beside three manifests that own
+      # the truth. Sprints 8.53-8.54 moved Express 4->5, Next 13->16 and React 18->19; a month later
+      # `Structure.txt` still said "Express 4 API" and "Next.js 13, React 18", and the README's
+      # Express badge said 5.1 against an installed 5.2.1. A badge may state fewer segments than the
+      # manifest (16.3 for 16.3.4) - just not different ones.
+      - name: Check the stated stack versions match the manifests
+        run: npm run check:stack-versions
+
+      # A theme id is stored in `places.themes` and is what the browse filter offers, so both tiers
+      # have to agree on the list. They cannot share a module (ESM in one package, CommonJS in the
+      # other), so it is duplicated -- and a duplicate without a check is exactly how the seed came
+      # to carry `heritage` and `spiritual`, neither of which is a theme.
+      - name: Check the theme vocabulary matches across tiers
+        run: npm run check:themes
+
+      # IMP-114. Three ways a dictionary rots, and only one of them is visible while you work: a
+      # component asking for a key nothing defines renders the key in the navbar, but only on the
+      # page you did not open. The other two -- a dead Hindi string, and a locale list that
+      # disagrees with the router -- are invisible until a user finds them.
+      - name: Check the translation vocabulary
+        run: npm run check:i18n
+
+      # Only the free half of IMP-128 runs here: the README's headline total against its own three
+      # parts, which needs no test run. The parts themselves are checked by the `test-counts` job
+      # below, once the three suites have reported what they actually ran.
+      - name: Check the README's test-count arithmetic
+        run: npm run check:test-counts
+
+      # Every NEXT_PUBLIC_* value is inlined into the bundle at build time, so the build needs them
+      # present to compile. These are deliberately fake: the job proves the app compiles, it does
+      # not talk to Firebase, and a real credential in a workflow file would be a leak. They are
+      # public identifiers in any case — access is controlled by Firebase security rules and by the
+      # backend's token verification, not by keeping these hidden.
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:5000/api
+          NEXT_PUBLIC_FIREBASE_API_KEY: ci-placeholder-api-key
+          NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ci-placeholder.firebaseapp.com
+          NEXT_PUBLIC_FIREBASE_PROJECT_ID: ci-placeholder
+          NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: ci-placeholder.appspot.com
+          NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: '000000000000'
+          NEXT_PUBLIC_FIREBASE_APP_ID: '1:000000000000:web:0000000000000000000000'
+
+      # The only guard that needs the build, so it runs here rather than with the other seven above.
+      # Two budgets: the shared baseline every page pays (240.6 kB gzip as measured in Sprint 8.74)
+      # and any single route's own code. It exists because the regression that actually happens is
+      # somebody adding an import to a shared file — importing `leaflet` into `_app.jsx` moved the
+      # baseline to 282.3 kB, which is what this was falsified against. Deliberately NOT Lighthouse:
+      # a lab score swings ten points between identical runs on a shared runner, and the numbers
+      # worth gating need a deployment (`H2`). Gzip length does not vary by machine.
+      - name: Check the bundle has not grown past its budget
+        run: npm run check:bundle-size
+
+  frontend-tests:
+    name: Frontend component tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      # No database, no service container, no environment variables: Firebase is mocked at the
+      # module boundary and everything else under test is either a pure function or a component
+      # rendered into jsdom. The `npm test` script pins TZ through cross-env — deliberately to a
+      # zone that is NOT UTC, so that deleting a `timeZone` option in dateFormat.js fails here
+      # rather than shipping (BUG-046). A UTC runner would let that regression through.
+      - name: Run component and unit tests
+        run: npm test -- --json --outputFile=test-count-component.json
+        working-directory: frontend
+
+      # The count, not the report. `--outputFile` leaves the console reporter untouched, so a
+      # failure here still reads normally; the JSON exists only so `test-counts` can compare
+      # `numTotalTests` against the README (IMP-128).
+      - name: Upload the component test count
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-count-component
+          path: frontend/test-count-component.json
+          retention-days: 1
+
+  migrations:
+    name: Migrations against Postgres
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Pinned to a major version rather than `latest`, so a Postgres release cannot turn a green
+        # pipeline red overnight without anyone changing anything.
+        image: postgres:16
+        env:
+          POSTGRES_USER: easytrip
+          POSTGRES_PASSWORD: easytrip
+          POSTGRES_DB: easytrip
+        ports:
+          - 5432:5432
+        # Without this the job races the container: the runner is ready long before Postgres is
+        # accepting connections, and the first migration fails with ECONNREFUSED.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://easytrip:easytrip@localhost:5432/easytrip
+      # Not "production": that would turn on TLS certificate verification (IMP-063) against a
+      # plaintext local container, which is correct behaviour and would fail here for the wrong
+      # reason.
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      # The fresh-database path: schema.sql builds everything from nothing. This is what
+      # docker-compose runs on first start, and what a new contributor gets.
+      - name: Create schema from schema.sql
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/src/config/schema.sql
+
+      # schema.sql must be re-runnable. It was not until this sprint: the CREATE TABLEs were
+      # guarded with IF NOT EXISTS but the CREATE TRIGGERs were not, so a second run got most of
+      # the way through and then failed with "trigger already exists".
+      - name: Re-run schema.sql (must be idempotent)
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/src/config/schema.sql
+
+      - name: Apply migrations
+        run: npm run migrate
+        working-directory: backend
+
+      # The property the whole runner design rests on. `migrate.js` records a migration after it
+      # commits, so a crash in that window re-runs it — which is only safe because every migration
+      # is re-runnable. This step is what stops that from being an assumption: a migration that
+      # is not idempotent fails here, in CI, rather than during a deploy.
+      - name: Re-apply migrations from scratch (must be idempotent)
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "TRUNCATE schema_migrations"
+          npm run migrate
+        working-directory: backend
+
+      # Exits non-zero if any applied migration's checksum no longer matches its file.
+      - name: Report migration status
+        run: npm run migrate:status
+        working-directory: backend
+
+  api-tests:
+    name: API test suite
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Same pin and the same health gate as the migrations job: the runner is ready long before
+        # Postgres accepts connections, and without the healthcheck the first query ECONNREFUSEs.
+        image: postgres:16
+        env:
+          POSTGRES_USER: easytrip
+          POSTGRES_PASSWORD: easytrip
+          POSTGRES_DB: easytrip
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://easytrip:easytrip@localhost:5432/easytrip
+      # Not "production": that would turn on TLS certificate verification (IMP-063) against a
+      # plaintext local container and fail for the wrong reason.
+      NODE_ENV: test
+      # The suite replaces firebase-admin with a mock, but `app.js` validates its environment at
+      # import time and exits when something required is absent — so the variables still have to
+      # be present. None of these values is real or reaches a real service.
+      FIREBASE_PROJECT_ID: ci-test-project
+      FIREBASE_CLIENT_EMAIL: ci@ci-test-project.iam.gserviceaccount.com
+      FIREBASE_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nci\n-----END PRIVATE KEY-----\n"
+      CLOUDINARY_CLOUD_NAME: ci-cloud
+      CLOUDINARY_API_KEY: ci-key
+      CLOUDINARY_API_SECRET: ci-secret
+      CORS_ALLOWED_ORIGINS: http://localhost:3000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      # The suite builds its own schema and applies every migration in `beforeAll`, so it needs no
+      # separate schema step — and a migration that breaks a fresh database fails here too, not
+      # only in the job that exists to check migrations.
+      - name: Run the API test suite
+        run: npm test -- --json --outputFile=test-count-api.json
+        working-directory: backend
+
+      - name: Upload the API test count
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-count-api
+          path: backend/test-count-api.json
+          retention-days: 1
+
+  e2e:
+    name: End-to-end journeys
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: easytrip
+          POSTGRES_PASSWORD: easytrip
+          POSTGRES_DB: easytrip
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # `e2e/global-setup.js` uses this when present and boots a throwaway cluster when absent, so
+      # CI and a laptop take the same code path with no `if (CI)` branch in the setup.
+      DATABASE_URL: postgresql://easytrip:easytrip@localhost:5432/easytrip
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      # Chromium only. The suite asserts routing, hydration and integration rather than
+      # cross-browser rendering, so three engines would triple the runtime for no extra signal.
+      # `--with-deps` installs the system libraries the runner image does not ship.
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      # The Firebase Auth Emulator runs from the `firebase-tools` devDependency installed by the
+      # root `npm ci` above — no extra setup step, and **no JVM**: only the Firestore, Realtime
+      # Database and Pub/Sub emulators need Java, the Auth emulator is Node (ADR-028).
+      #
+      # If it cannot start, `e2e/global-setup.js` records the reason and the authenticated specs
+      # skip *with that reason in the report* rather than silently passing. A skipped security test
+      # must never look like a green one.
+      - name: Run end-to-end journeys
+        run: npm run test:e2e
+
+      # Written by the CI-only `json` reporter in playwright.config.js. The spec tree, not `stats`:
+      # a journey that skipped because the Auth Emulator was unavailable is still a journey.
+      - name: Upload the journey count
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-count-e2e
+          path: test-count-e2e.json
+          retention-days: 1
+
+      # The trace and screenshots are the only way to diagnose a browser failure after the fact;
+      # without them a red E2E job is just a stack trace with no page behind it.
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
+  # The sixth job, and the only one that exists to check a sentence (IMP-128).
+  #
+  # It has to be separate and last, because the number it verifies is spread across three jobs that
+  # deliberately do not share a runner: the API suite needs Postgres, the component suite needs
+  # neither, and the journeys need a browser. Each reports what it ran; this compares the three
+  # against the README's claim.
+  #
+  # `needs` all three, so a red suite fails on its own terms rather than as a confusing count
+  # mismatch — and a suite that did not run cannot silently satisfy the check.
+  test-counts:
+    name: README test counts
+    runs-on: ubuntu-latest
+    needs: [api-tests, frontend-tests, e2e]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      # Distinct filenames, so merging three artifacts into one directory cannot collide.
+      - name: Download the three counts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-count-*
+          merge-multiple: true
+          path: test-counts
+
+      # No dependencies needed: the guard is one file using only node: built-ins.
+      - name: Check the README's test counts against the suites
+        run: |
+          node scripts/check-test-counts.mjs \
+            --api-json=test-counts/test-count-api.json \
+            --component-json=test-counts/test-count-component.json \
+            --e2e-json=test-counts/test-count-e2e.json
+
+  # ---------------------------------------------------------------------------
+  # Dependency advisories
+  # ---------------------------------------------------------------------------
+  #
+  # Gated at **high**, not at `moderate` or `low`, and that threshold is the whole design.
+  #
+  # All three workspaces carry moderate advisories today (backend 7, root 9, frontend 0), every one
+  # of them transitive and none with a fix that does not force a major bump on something
+  # load-bearing. A gate set at `moderate` would therefore be red on the day it was added — and a
+  # gate that is red on arrival does not get fixed, it gets ignored, and then it is a job everyone
+  # has learned to skip past on the way to the real failures.
+  #
+  # `high` is the level at which this project will actually stop and act. It caught its first one
+  # immediately: `fast-uri` reachable through `firebase-tools`, fixed by a non-breaking bump.
+  #
+  # `--omit=dev` is deliberately NOT passed. It would have hidden that finding, because
+  # `firebase-tools` is a devDependency — and a compromised dev dependency runs on the machine that
+  # holds the deploy credentials, which is not a smaller problem than one in production.
+  #
+  # Not `needs:`-ed by anything. An advisory published overnight should fail this job without
+  # blocking the test suites from reporting what they know.
+  audit:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      # Each workspace has its own lockfile, so each is audited on its own. `continue-on-error` is
+      # deliberately absent: the point of a gate is that it stops something.
+      - name: Audit root
+        run: npm audit --audit-level=high
+
+      - name: Audit backend
+        working-directory: backend
+        run: npm audit --audit-level=high
+
+      - name: Audit frontend
+        working-directory: frontend
+        run: npm audit --audit-level=high

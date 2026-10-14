@@ -1,1 +1,79 @@
-node_modules
+# Dependencies
+node_modules/
+.pnp
+.pnp.*
+
+# Secrets — never commit. Each tier ships a .env.example to copy from.
+.env
+.env.*
+!.env.example
+*service-account*.json
+*serviceAccount*.json
+*firebase-adminsdk*.json
+*.pem
+*.key
+*.p12
+*.p8
+
+# Build output
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Upload/runtime scratch
+tmp/
+uploads/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# OS noise
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Deploy
+.vercel
+
+# Local-only planning knowledge base
+docs/
+
+# Test-count reports (IMP-128). Written by `jest --json` and Playwright's json reporter in CI, read
+# once by scripts/check-test-counts.mjs, and meaningless afterwards — they are a measurement of a
+# particular run, not source. Committing one would also make the guard checkable against a stale
+# file instead of a live suite.
+test-count-*.json
+
+# Playwright (IMP-094): traces, screenshots and the HTML report are per-run diagnostics, not source.
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+
+# Claude Code local session state (scheduled task locks, local settings). Not tracked today; listed
+# so it cannot be swept in by a `git add -A`. Anything in here that is genuinely meant to be shared
+# should be moved out rather than un-ignored.
+.claude/
+
+# Throwaway Postgres clusters. `e2e/global-setup.js` and the API suite both boot one when
+# DATABASE_URL is unset, and a data directory is ~66 MB of binary state that must never reach a
+# commit. One did land in the repo root once — a helper script fell back to `$PWD` when its
+# scratch-directory variable was unset — and it went unstaged only because Postgres creates the
+# directory 0700 and git could not read it. That is luck, not a guard. This is the guard.
+pgdata*/

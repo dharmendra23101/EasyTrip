@@ -1,19 +1,51 @@
-import { createContext, useContext, useState, useEffect } from 'react';
-import { 
-  onAuthStateChanged, 
-  createUserWithEmailAndPassword, 
-  signInWithEmailAndPassword, 
-  signOut, 
+import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import {
+  onIdTokenChanged,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
   GoogleAuthProvider,
   updateProfile as updateFirebaseProfile,
   signInWithPopup,
-  signInWithCredential,
+  sendPasswordResetEmail,
   getRedirectResult
 } from 'firebase/auth';
-import axios from 'axios';
+import apiClient from '../services/apiClient';
 import { auth } from '../config/firebase';
 
 const AuthContext = createContext({});
+
+// Must match the fallback used by every other caller (placeService, the admin gates,
+// the pages/api image routes). A '/api' default would silently resolve to the Next
+// server, which has no auth routes, and admin detection would 404 into `false`.
+
+// The backend refuses to answer if it is down; without a timeout `loading` can hang
+// forever and the whole app sits on its auth spinner.
+const ADMIN_CHECK_TIMEOUT_MS = 8000;
+
+// Name, Path and SameSite are load-bearing: the four /admin/* getServerSideProps gates
+// read `req.cookies.et_id_token`, and only a Lax cookie rides a top-level document
+// navigation. A Firebase ID token lives in JS memory, so without this mirror no
+// document request to /admin/* carries any credential at all.
+const TOKEN_COOKIE = 'et_id_token';
+
+const syncTokenCookie = (token) => {
+  if (typeof document === 'undefined') return;
+
+  if (token) {
+    const secure = window.location.protocol === 'https:' ? '; Secure' : '';
+    document.cookie = `${TOKEN_COOKIE}=${token}; Path=/; Max-Age=3600; SameSite=Lax${secure}`;
+  } else {
+    document.cookie = `${TOKEN_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax`;
+  }
+};
+
+// `apiClient` already unwraps the backend's validation shape — { message, errors: [{ message }] } —
+// and surfaces the field message as `error.message` (IMP-072). This used to dig through
+// `error.response.data` itself, which an `ApiClientError` does not have; those branches became dead
+// the moment the calls moved onto the shared client, so they are gone rather than left looking
+// load-bearing. Firebase auth errors also carry `.message`, so one lookup covers both sources.
+const apiErrorMessage = (error, fallback) => error?.message || fallback;
 
 export const useAuth = () => useContext(AuthContext);
 
@@ -30,81 +62,43 @@ export const AuthProvider = ({ children }) => {
     setIsClient(true);
   }, []);
 
-  // Store user credentials in localStorage - only on client side
-  const storeUserCredentials = (user, admin = false) => {
-    // Only run on client-side
-    if (typeof window === 'undefined') return;
+  // Get a fresh Firebase ID token for the signed-in user, or null when signed out.
+  // Stable identity so consumers can safely use it in effect dependency arrays.
+  const getIdToken = useCallback(async () => {
+    if (!auth.currentUser) return null;
 
-    if (user) {
-      localStorage.setItem('currentUser', user.uid);
-      localStorage.setItem('currentUserName', user.displayName || user.email || 'User');
-      localStorage.setItem('isAdmin', admin.toString());
-      localStorage.setItem('authTimestamp', new Date().toISOString());
-      
-      console.log(`User credentials stored in localStorage: ${user.uid}`);
-    } else {
-      localStorage.removeItem('currentUser');
-      localStorage.removeItem('currentUserName');
-      localStorage.removeItem('isAdmin');
-      localStorage.removeItem('authTimestamp');
-      
-      console.log('User credentials cleared from localStorage');
-    }
-  };
-
-  // Check if user is an admin
-  const checkIfAdmin = async (user) => {
-    if (!user) return false;
-    
     try {
-      // For development - allow specific users to be admin
-      if (process.env.NODE_ENV === 'development' && 
-          (user.uid === 'AdminX' || 
-           user.uid === 'af9GjxDZDeNCT69gLbEkk45md1x1' || 
-           user.uid === 'aJJJxZNJXsZgQStO3yL7ahjKZDr1')) {
-        console.log(`Development mode: User ${user.uid} is admin`);
-        return true;
-      }
-      
-      const token = await user.getIdToken();
-      
-      // First try to get admin status from token claims
-      try {
-        const idTokenResult = await user.getIdTokenResult();
-        if (idTokenResult.claims.admin === true) {
-          return true;
-        }
-      } catch (error) {
-        console.log('No admin claim in token, checking backend...');
-      }
-      
-      // If not in claims, check with backend
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
-      const response = await axios.get(`${API_URL}/auth/check-admin`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'X-User': user.uid,
-          'X-User-Name': user.displayName || user.email || 'User'
-        }
+      return await auth.currentUser.getIdToken();
+    } catch (error) {
+      console.error('Error getting ID token:', error);
+      return null;
+    }
+  }, []);
+
+  // Check if user is an admin.
+  // `users.is_admin` (via GET /auth/check-admin) is the only authority, deliberately.
+  // A Firebase custom `admin` claim used to short-circuit this, but the backend gate
+  // denies whenever the claim and the DB column disagree — trusting the claim here
+  // would hand a de-admined user the full admin UI and then 403 every call it makes.
+  const checkIfAdmin = async (user, idToken) => {
+    if (!user) return false;
+
+    try {
+      const token = idToken || (await user.getIdToken());
+
+      const response = await apiClient.get('/auth/check-admin', {
+        authToken: token,
+        requireAuth: true,
+        timeout: ADMIN_CHECK_TIMEOUT_MS
       });
-      
+
       if (response.status === 200) {
-        return response.data.isAdmin;
+        return response.data.isAdmin === true;
       }
-      
+
       return false;
     } catch (error) {
-      console.error('Error checking admin status:', error);
-      
-      // For development - allow specific users to be admin even on error
-      if (process.env.NODE_ENV === 'development' && 
-          (user.uid === 'AdminX' || 
-           user.uid === 'af9GjxDZDeNCT69gLbEkk45md1x1' || 
-           user.uid === 'aJJJxZNJXsZgQStO3yL7ahjKZDr1')) {
-        console.log(`Development fallback: User ${user.uid} is admin`);
-        return true;
-      }
-      
+      console.error('Error checking admin status:', error.message);
       return false;
     }
   };
@@ -113,24 +107,20 @@ export const AuthProvider = ({ children }) => {
   const register = async (email, password, name) => {
     try {
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-      
+
       // Update profile with name
       if (name) {
         await updateFirebaseProfile(userCredential.user, {
           displayName: name
         });
       }
-      
-      // Check if admin and store credentials
-      const adminStatus = await checkIfAdmin(userCredential.user);
-      storeUserCredentials(userCredential.user, adminStatus);
-      
+
       return { success: true, user: userCredential.user };
     } catch (error) {
       console.error('Registration error:', error);
-      return { 
-        success: false, 
-        error: error.message 
+      return {
+        success: false,
+        error: error.message
       };
     }
   };
@@ -139,17 +129,13 @@ export const AuthProvider = ({ children }) => {
   const login = async (email, password) => {
     try {
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
-      
-      // Check if admin and store credentials
-      const adminStatus = await checkIfAdmin(userCredential.user);
-      storeUserCredentials(userCredential.user, adminStatus);
-      
+
       return { success: true, user: userCredential.user };
     } catch (error) {
       console.error('Login error:', error);
-      return { 
-        success: false, 
-        error: error.message 
+      return {
+        success: false,
+        error: error.message
       };
     }
   };
@@ -159,57 +145,61 @@ export const AuthProvider = ({ children }) => {
   const signInWithGoogle = async () => {
     try {
       const result = await signInWithPopup(auth, googleProvider);
-      
-      // Check if admin and store credentials
-      const adminStatus = await checkIfAdmin(result.user);
-      storeUserCredentials(result.user, adminStatus);
-      
+
       return { success: true, user: result.user };
     } catch (error) {
-      console.error("Error signing in with Google", error);
-      return { 
-        success: false, 
-        error: error.message 
+      console.error('Error signing in with Google', error);
+      return {
+        success: false,
+        error: error.message
       };
     }
   };
 
-  // Google One Tap Sign-In
-  const handleGoogleOneTap = async (credential) => {
+  const resetPassword = async (email) => {
     try {
-      // Create a Google Auth Provider credential
-      const googleCredential = GoogleAuthProvider.credential(null, credential);
-      
-      // Sign in with the credential
-      const result = await signInWithCredential(auth, googleCredential);
-      
-      // Check if admin and store credentials
-      const adminStatus = await checkIfAdmin(result.user);
-      storeUserCredentials(result.user, adminStatus);
-      
-      console.log("Google One-Tap sign-in successful", result.user);
-      
-      return { success: true, user: result.user };
+      await sendPasswordResetEmail(auth, email);
+      return { success: true };
     } catch (error) {
-      console.error("Error with Google One-Tap sign-in", error);
-      return { 
-        success: false, 
-        error: error.message 
-      };
+      // Account enumeration guard: an unknown address must be indistinguishable from a known one,
+      // or this page becomes a way to test which emails have accounts. Only faults the caller can
+      // act on — malformed address, rate limiting, network — are surfaced. Deciding this here
+      // rather than in the page means no future caller can leak it by accident.
+      if (error.code === 'auth/user-not-found') {
+        return { success: true };
+      }
+      console.error('Password reset error:', error);
+      if (error.code === 'auth/invalid-email') {
+        return { success: false, error: 'That email address does not look valid.' };
+      }
+      if (error.code === 'auth/too-many-requests') {
+        return {
+          success: false,
+          error: 'Too many attempts. Please wait a few minutes and try again.'
+        };
+      }
+      return { success: false, error: 'Could not send the reset email. Please try again.' };
     }
   };
+
+  // Google One Tap was removed in Sprint 2.2 (IMP-015): it was initialised with the Firebase Web
+  // API key in place of a Google OAuth Client ID, which are different credentials, so it could
+  // never complete a sign-in. Popup Google sign-in above is the supported path. Restoring One Tap
+  // needs a real OAuth Client ID — see KNOWN_LIMITATIONS.md.
 
   // Logout
   const logout = async () => {
     try {
       await signOut(auth);
-      storeUserCredentials(null); // Clear localStorage
+      // onIdTokenChanged clears this too, but do it eagerly so a document request
+      // fired between signOut() and the listener cannot carry a dead token.
+      syncTokenCookie(null);
       return { success: true };
     } catch (error) {
       console.error('Logout error:', error);
-      return { 
-        success: false, 
-        error: error.message 
+      return {
+        success: false,
+        error: error.message
       };
     }
   };
@@ -220,119 +210,66 @@ export const AuthProvider = ({ children }) => {
       if (!currentUser) {
         throw new Error('No user logged in');
       }
-      
+
       // Update profile in Firebase if needed
       if (data.name) {
         await updateFirebaseProfile(auth.currentUser, {
           displayName: data.name
         });
       }
-      
+
       // Update custom user data in your backend
-      const token = await currentUser.getIdToken();
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
-      const response = await axios.put(`${API_URL}/auth/profile`, data, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'X-User': currentUser.uid,
-          'X-User-Name': currentUser.displayName || currentUser.email || 'User'
-        }
+      const token = await getIdToken();
+      if (!token) {
+        throw new Error('Your session has expired. Please sign in again.');
+      }
+
+      const response = await apiClient.put('/auth/profile', data, {
+        authToken: token,
+        requireAuth: true
       });
-      
+
       if (response.status !== 200) {
         throw new Error('Failed to update profile');
       }
-      
+
       // Update current user state
       const updatedUser = {
         ...currentUser,
         ...data
       };
-      
+
       setCurrentUser(updatedUser);
-      
-      // Update localStorage
-      storeUserCredentials(updatedUser, isAdmin);
-      
+
       return { success: true };
     } catch (error) {
       console.error('Profile update error:', error);
-      return { 
-        success: false, 
-        error: error.message 
+      return {
+        success: false,
+        error: apiErrorMessage(error, 'Failed to update profile')
       };
     }
   };
 
-  // Debug auth state for development - safe for SSR
-  const debugAuthState = (user, adminStatus) => {
-    if (process.env.NODE_ENV === 'development') {
-      console.log('--- Auth State Update ---');
-      console.log('Current Date/Time:', new Date().toISOString());
-      
-      if (user) {
-        console.log('User:', {
-          uid: user.uid,
-          email: user.email,
-          name: user.displayName,
-          isAdmin: adminStatus
-        });
-      } else {
-        console.log('User: Not authenticated');
-      }
-      
-      // Debug localStorage - only if on client
-      if (typeof window !== 'undefined') {
-        console.log('localStorage:', {
-          currentUser: localStorage.getItem('currentUser'),
-          currentUserName: localStorage.getItem('currentUserName'),
-          isAdmin: localStorage.getItem('isAdmin'),
-          authTimestamp: localStorage.getItem('authTimestamp')
-        });
-      }
-      console.log('------------------------');
-    }
-  };
-
-  // Check localStorage for stored user on client-side only
-  useEffect(() => {
-    // This effect only runs on client-side after initial render
-    if (typeof window !== 'undefined' && !currentUser && !loading) {
-      const storedUserId = localStorage.getItem('currentUser');
-      const storedUserName = localStorage.getItem('currentUserName');
-      const storedIsAdmin = localStorage.getItem('isAdmin') === 'true';
-      
-      // If we have stored user data but no currentUser from Firebase
-      if (storedUserId && !auth.currentUser) {
-        console.log('Restoring user from localStorage:', storedUserId);
-        
-        // Create temporary user object from localStorage
-        const tempUser = {
-          uid: storedUserId,
-          displayName: storedUserName || 'User',
-          isAdmin: storedIsAdmin,
-          // Add a stub for getIdToken to prevent errors
-          getIdToken: () => Promise.resolve('localStorage-token')
-        };
-        
-        setCurrentUser(tempUser);
-        setIsAdmin(storedIsAdmin);
-      }
-    }
-  }, [isClient, loading]);
-
-  // Listen for auth state changes - only after initial render
+  // Listen for auth state changes - only after initial render.
+  // The Firebase SDK's own persistence is the single source of session truth:
+  // `loading` stays true until it resolves, so the UI never renders a stale session.
+  // onIdTokenChanged (not onAuthStateChanged) so the mirrored cookie is rewritten
+  // when Firebase silently rotates the ~1h ID token, not just on sign-in/sign-out.
   useEffect(() => {
     // Skip effect during SSR
     if (typeof window === 'undefined') return;
-    
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+
+    const unsubscribe = onIdTokenChanged(auth, async (user) => {
       try {
         if (user) {
+          const token = await user.getIdToken();
+          syncTokenCookie(token);
+
           // Check if user is an admin
-          const adminStatus = await checkIfAdmin(user);
+          const adminStatus = await checkIfAdmin(user, token);
           setIsAdmin(adminStatus);
-          
+
           // Format the user object
           const formattedUser = {
             uid: user.uid,
@@ -342,25 +279,21 @@ export const AuthProvider = ({ children }) => {
             isAdmin: adminStatus,
             getIdToken: () => user.getIdToken()
           };
-          
+
           setCurrentUser(formattedUser);
-          
-          // Store in localStorage for persistence
-          storeUserCredentials(formattedUser, adminStatus);
-          
+
           // Debug for development
-          debugAuthState(formattedUser, adminStatus);
         } else {
           // User is signed out
+          syncTokenCookie(null);
           setCurrentUser(null);
           setIsAdmin(false);
-          storeUserCredentials(null); // Clear localStorage
-          
+
           // Debug for development
-          debugAuthState(null, false);
         }
       } catch (error) {
         console.error('Error in auth state change handler:', error);
+        syncTokenCookie(null);
         setCurrentUser(null);
         setIsAdmin(false);
       } finally {
@@ -372,11 +305,10 @@ export const AuthProvider = ({ children }) => {
     getRedirectResult(auth)
       .then((result) => {
         if (result?.user) {
-          console.log("Signed in with redirect", result.user);
         }
       })
       .catch((error) => {
-        console.error("Error with redirect sign-in", error);
+        console.error('Error with redirect sign-in', error);
       });
 
     return () => unsubscribe();
@@ -387,6 +319,7 @@ export const AuthProvider = ({ children }) => {
 
   const value = {
     currentUser,
+    isAuthenticated: !!currentUser,
     loading,
     isAdmin,
     register,
@@ -394,16 +327,12 @@ export const AuthProvider = ({ children }) => {
     logout,
     updateProfile,
     signInWithGoogle,
-    handleGoogleOneTap,
-    storeUserCredentials,
+    resetPassword,
+    getIdToken,
     isClient // Expose this so components can know when it's safe to render client-only content
   };
 
-  return (
-    <AuthContext.Provider value={value}>
-      {children}
-    </AuthContext.Provider>
-  );
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
 
 export default AuthProvider;

@@ -1,0 +1,50 @@
+{
+  "name": "EasyTrip — Discover India",
+  "short_name": "EasyTrip",
+  "description": "Discover destinations across India, save the ones you like, and plan a trip day by day.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#ffffff",
+  "theme_color": "#0277b4",
+  "categories": ["travel", "lifestyle"],
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-192-maskable.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Browse destinations",
+      "short_name": "Browse",
+      "url": "/browse"
+    },
+    {
+      "name": "My trips",
+      "short_name": "Trips",
+      "url": "/trips"
+    }
+  ]
+}
